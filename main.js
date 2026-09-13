@@ -105,7 +105,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,   // Aislamiento total de contextos.
       nodeIntegration: false,   // El renderer NO ve Node: solo el puente preload.
-      sandbox: false,           // preload necesita require('electron') para el puente.
+      sandbox: true,            // Renderer sandboxed: el preload solo usa contextBridge/ipcRenderer.
       backgroundThrottling: false,
       spellcheck: false,        // Sin diccionarios: ahorro de memoria en el renderer.
     },
@@ -115,6 +115,10 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   applyPinnedLevel(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+
+  // Cero navegación y cero ventanas nuevas: el widget solo renderiza su HTML local.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
 
   mainWindow.once('ready-to-show', () => mainWindow?.show());
 
@@ -206,6 +210,18 @@ const { toNumber, round1, round2, pickActiveIface, parseGpuCsvLine } = require('
 
 /** Evita que un PID malicioso derrame bytes nulos en el nombre del proceso. */
 const sanitize = (value) => String(value ?? '').replace(/[\0\r\n]+/g, ' ').trim();
+
+/** Defensa en profundidad: solo el frame principal de la ventana del widget puede invocar IPC. */
+function isTrustedSender(event) {
+  const frame = event?.senderFrame;
+  return (
+    !!mainWindow &&
+    event?.sender === mainWindow.webContents &&
+    !!frame &&
+    !frame.parent &&
+    frame === mainWindow.webContents.mainFrame
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Caché TTL con single-flight: si el renderer llama al mismo canal varias
@@ -629,7 +645,9 @@ ipcMain.handle('get-gpu-info', () => {
  * - Windows: `taskkill /F /T` (árboles de proceso; process.kill no los corta).
  * - POSIX:   `process.kill(pid)` (SIGTERM por defecto).
  */
-ipcMain.handle('kill-process', async (_event, pid) => {
+ipcMain.handle('kill-process', async (event, pid) => {
+  // Defensa en profundidad: rechaza IPC que no provenga del frame principal del widget.
+  if (!isTrustedSender(event)) return { ok: false, error: 'Unauthorized' };
   // Validación extraída a un módulo (testeable sin Electron).
   const check = validatePid(pid, process.pid);
   if (!check.ok) return check;
@@ -661,7 +679,8 @@ ipcMain.handle('kill-process', async (_event, pid) => {
 });
 
 /** toggle-always-on-top: fija / desfija el widget sobre otras apps. */
-ipcMain.handle('toggle-always-on-top', () => {
+ipcMain.handle('toggle-always-on-top', (event) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'Unauthorized' };
   if (!mainWindow) return { ok: false, error: 'No window' };
   mainWindow.__alwaysOnTopPinned = !mainWindow.__alwaysOnTopPinned;
   applyPinnedLevel(mainWindow);
@@ -675,7 +694,8 @@ ipcMain.handle('get-always-on-top', () => ({
 }));
 
 /** set-widget-mode: redimensiona la ventana para Mini / Dev / Charts / Procs. */
-ipcMain.handle('set-widget-mode', (_event, mode) => {
+ipcMain.handle('set-widget-mode', (event, mode) => {
+  if (!isTrustedSender(event)) return { ok: false, error: 'Unauthorized' };
   if (typeof mode !== 'string') return { ok: false, error: 'Invalid mode' };
   setWidgetMode(mode);
   return { ok: true, mode: widgetMode };

@@ -81,3 +81,9 @@ test('validatePid: acepta un PID válido distinto', () => {
   assert.deepEqual(validatePid(1234, 100), { ok: true, pid: 1234 });
   assert.deepEqual(validatePid('1234', 100), { ok: true, pid: 1234 });
 });
+
+test('validatePid: rechaza PIDs críticos del sistema', () => {
+  // PID 4 = System (Windows), PID 1 = init/systemd (POSIX).
+  assert.deepEqual(validatePid(4, 100), { ok: false, error: 'Refusing to kill a system-critical process' });
+  assert.deepEqual(validatePid('4', 100), { ok: false, error: 'Refusing to kill a system-critical process' });
+});

@@ -15,8 +15,9 @@
     "systeminformation": "^5.23.5"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "@electron/fuses": "^2.1.3",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.breiner.sysmonwidget",
@@ -25,6 +26,7 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "afterPack": "build/after-pack.js",
     "files": [
       "main.js",
       "preload.js",
