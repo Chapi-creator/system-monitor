@@ -13,7 +13,10 @@
  * - DOM: filas y nodos creados una vez y reutilizados; solo textContent/width.
  */
 
-/* global Chart */
+/* global Chart, SysMonMetrics */
+
+// Utilidades puras compartidas con main.js (módulo UMD cargado antes que este script).
+const { formatSpeed } = window.SysMonMetrics;
 
 const METRICS_INTERVAL_MS = 2500;  // Especificación: 2.5 s por ciclo.
 const MAX_POINTS = 20;             // Límite estricto del historial de gráficas.
@@ -100,13 +103,6 @@ const el = {
 const fmt1 = (n) => (Number.isFinite(n) ? n.toFixed(1) : '--');
 const clampPct = (n) => Math.min(100, Math.max(0, Number.isFinite(n) ? n : 0));
 
-/** Conversión dinámica exacta: <1 MB/s → KB/s (÷1024, 1 dec); ≥ → MB/s (2 dec). */
-function formatSpeed(bytesSec) {
-  const bytes = Number(bytesSec);
-  if (!Number.isFinite(bytes)) return '--';
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB/s`;
-  return `${(bytes / 1024).toFixed(1)} KB/s`;
-}
 
 /** Temperatura legible: '-1' (sentinel) → 'n/a'. */
 function formatTemp(celsius) {
@@ -449,7 +445,7 @@ function renderMini(stats) {
 
   el.miniTempBar.style.width = tempValid ? `${clampPct(temp)}%` : '0%';
   el.miniTempValue.textContent = formatTemp(temp);
-  el.miniTempBar.parentElement.classList.toggle(
+  el.miniTempBar.closest('.strip')?.classList.toggle(
     'strip--alert',
     tempValid && temp >= TEMP_ALERT_THRESHOLD
   );

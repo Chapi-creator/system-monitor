@@ -199,18 +199,12 @@ function quitApp() {
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
-const toNumber = (value) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-};
+// Utilidades PURAS compartidas con el renderer y los tests: viven en un módulo
+// UMD (src/lib/metrics.js) para poder probarse en Node sin arrancar Electron.
+const { toNumber, round1, round2, pickActiveIface, parseGpuCsvLine } = require('./src/lib/metrics');
 
 /** Evita que un PID malicioso derrame bytes nulos en el nombre del proceso. */
 const sanitize = (value) => String(value ?? '').replace(/[\0\r\n]+/g, ' ').trim();
-
-/** Redondeo a 1 decimal — el formato de precisión de todas las métricas. */
-const round1 = (n) => Math.round(toNumber(n) * 10) / 10;
-/** Redondeo a 2 decimales — reservado para magnitudes en GB. */
-const round2 = (n) => Math.round(toNumber(n) * 100) / 100;
 
 // ---------------------------------------------------------------------------
 // Caché TTL con single-flight: si el renderer llama al mismo canal varias
@@ -314,10 +308,19 @@ function scheduleCpuTempRefresh() {
 const isAdmin = process.platform === 'win32'
   ? (() => {
       try {
-        return require('node:child_process')
-          .execSync('net session', { stdio: 'ignore', windowsHide: true }) !== null;
+        // Chequeo por TOKEN (IsInRole) en lugar de `net session`: este último
+        // también falla cuando el servicio "Server" (LanmanServer) está detenido,
+        // dando un falso "no admin" AUN con elevación.
+        const out = require('node:child_process')
+          .execSync(
+            'powershell -NoProfile -Command "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"',
+            { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 8000 }
+          )
+          .toString()
+          .trim();
+        return out === 'True';
       } catch {
-        return false; // net session falla sin elevación.
+        return false;
       }
     })()
   : process.getuid?.() === 0;
@@ -363,45 +366,6 @@ let gpuChild = null;
 let gpuRestarts = 0;
 let gpuRestartTimer = null;
 
-/**
- * Parsea una línea CSV de typeperf → uso agregado de GPU en %.
- * AGREGACIÓN ESTILO ADMINISTRADOR DE TAREAS: los contadores son POR MOTOR
- * (3D, Copy, VideoDecode, GDI...) y cada motor reporta 0-100% de SÍ MISMO.
- * 1) Se suman los motores del mismo engtype (varios motores 3D en paralelo
- *    = uso real del pipeline 3D).
- * 2) Se toma el MÁXIMO entre tipos de motor: la GPU ejecuta colas distintas
- *    en depuraciones separadas, y el % del chip es el del tipo más ocupado.
- * (El promedio plano sobre las ~277 instancias diluye el uso real a ~0:
- *  8% real de 3D se mostraba como 0.01%.)
- */
-function parseGpuCsvLine(line, columnTypes) {
-  if (!line || line[0] !== '"') return null;
-  const cols = [];
-  let cur = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') { inQuotes = !inQuotes; continue; }
-    if (ch === ',' && !inQuotes) { cols.push(cur); cur = ''; continue; }
-    cur += ch;
-  }
-  cols.push(cur);
-  if (cols.length < 2) return null;
-  if (!cols[0] || cols[0].startsWith('(PDH-CSV')) return null; // Cabecera.
-  if (!columnTypes) return null; // Aún sin cabecera: no hay cómo clasificar.
-  const byType = Object.create(null);
-  for (let i = 1; i < cols.length; i++) {
-    const v = Number(cols[i]);
-    if (!Number.isFinite(v) || v <= 0) continue;
-    const t = columnTypes[i - 1] ?? 'unknown';
-    byType[t] = (byType[t] ?? 0) + v;
-  }
-  let max = 0;
-  for (const k of Object.keys(byType)) {
-    if (byType[k] > max) max = byType[k];
-  }
-  return Math.max(0, Math.min(100, max));
-}
 
 function stopGpuSampler() {
   if (gpuRestartTimer) { clearTimeout(gpuRestartTimer); gpuRestartTimer = null; }
@@ -530,30 +494,6 @@ function getNetStats() {
   return netPending;
 }
 
-/** Adaptadores virtuales a omitir (Docker, Hyper-V/WSL, VMware, VPN-TAP, loopback...). */
-const VIRTUAL_IFACE_RE = /(docker|vethernet|vmware|virtualbox|loopback|wsl|hyper-v|tap|tun|bluetooth|hibernate|teredo)/i;
-
-/**
- * Selecciona la interfaz de red ACTIVA con precisión:
- * 1. operstate 'up' + tráfico instantáneo real (rx_sec/tx_sec > 0), excluyendo
- *    adaptadores virtuales → gana la de mayor ancho de banda instantáneo.
- * 2. Fallback: 'up' sin tráfico (sistema idle) → la de mayor tráfico acumulado.
- * 3. Último recurso: la de mayor tráfico acumulado del listado completo.
- */
-function pickActiveIface(net) {
-  const REAL = (i) => i && i.iface && !VIRTUAL_IFACE_RE.test(String(i.iface));
-  const total = (i, a, b) => toNumber(i[a]) + toNumber(i[b]);
-  const busiest = (arr, a, b) => arr.reduce((best, i) => (total(i, a, b) > total(best, a, b) ? i : best));
-
-  if (!Array.isArray(net) || net.length === 0) {
-    return { iface: 'n/a', rx_sec: 0, tx_sec: 0, rx_bytes: 0, tx_bytes: 0 };
-  }
-  const active = net.filter((i) => REAL(i) && i.operstate === 'up' && (toNumber(i.rx_sec) > 0 || toNumber(i.tx_sec) > 0));
-  if (active.length > 0) return busiest(active, 'rx_sec', 'tx_sec');
-  const up = net.filter((i) => REAL(i) && i.operstate === 'up');
-  if (up.length > 0) return busiest(up, 'rx_bytes', 'tx_bytes');
-  return busiest(net, 'rx_bytes', 'tx_bytes');
-}
 
 /**
  * get-system-stats: CPU (%), RAM (% y GB), red (B/s crudos) y temperatura °C.
@@ -746,6 +686,11 @@ ipcMain.handle('set-widget-mode', (_event, mode) => {
 // Ciclo de vida de la app
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
+  // Identidad de app para notificaciones nativas de Windows: sin AppUserModelID
+  // los toasts del renderer salen bajo la identidad genérica de "Electron" o
+  // fallan en el build empaquetado.
+  if (process.platform === 'win32') app.setAppUserModelId('com.breiner.sysmonwidget');
+
   createWindow();
   createTray();
 

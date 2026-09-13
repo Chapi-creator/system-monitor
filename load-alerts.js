@@ -142,6 +142,6 @@ async function stressGpu(durationMs) {
     log(`escenario desconocido: '${scenario}'. Usa: cpu | ram | gpu | all`);
     process.exit(1);
   }
-  log('carga finalizada — revisa el widget: la franja LED debe haberse encendido');
+  log('carga finalizada — revisa la notificación nativa de Windows');
   process.exit(0);
 })();
