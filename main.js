@@ -15,6 +15,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut } =
 const si = require('systeminformation');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { validatePid } = require('./src/lib/validate');
 
 // ---------------------------------------------------------------------------
 // Optimización Chromium: desactivar subsistemas que este widget no usa ANTES
@@ -217,23 +218,9 @@ const sanitize = (value) => String(value ?? '').replace(/[\0\r\n]+/g, ' ').trim(
 const STATS_TTL_MS = 2500;  // Igual al polling del renderer (2.5 s).
 const PROC_TTL_MS = 10000;  // Enumerar procesos cuesta ~7 s (WMI): 1 query real / 10 s.
 
-/** @type {Map<string, { at: number, promise: Promise<any> }>} */
-const inflight = new Map();
-
-async function cached(key, ttlMs, producer) {
-  const now = Date.now();
-  const entry = inflight.get(key);
-  if (entry && now - entry.at < ttlMs) return entry.promise;
-  const promise = producer().finally(() => {
-    // Limpieza diferida: la promesa queda servible hasta la próxima ventana TTL.
-    setTimeout(() => {
-      const e = inflight.get(key);
-      if (e && e.promise === promise) inflight.delete(key);
-    }, ttlMs);
-  });
-  inflight.set(key, { at: now, promise });
-  return promise;
-}
+// Caché TTL + single-flight extraída a un módulo para poder testearla en Node
+// sin arrancar Electron (test/main.test.js).
+const { cached, invalidate } = require('./src/lib/cache');
 
 /**
  * Warm-up de CPU: si.currentLoad() calcula la carga comparando DOS muestras.
@@ -643,15 +630,11 @@ ipcMain.handle('get-gpu-info', () => {
  * - POSIX:   `process.kill(pid)` (SIGTERM por defecto).
  */
 ipcMain.handle('kill-process', async (_event, pid) => {
-  const numericPid = Number(pid);
-  if (!Number.isInteger(numericPid) || numericPid <= 0) {
-    return { ok: false, error: 'Invalid PID' };
-  }
+  // Validación extraída a un módulo (testeable sin Electron).
+  const check = validatePid(pid, process.pid);
+  if (!check.ok) return check;
 
-  // Nunca dejar que el widget se suicide.
-  if (numericPid === process.pid) {
-    return { ok: false, error: 'Refusing to kill the widget itself' };
-  }
+  const numericPid = check.pid;
 
   try {
     if (process.platform === 'win32') {
@@ -665,7 +648,7 @@ ipcMain.handle('kill-process', async (_event, pid) => {
       process.kill(numericPid); // SIGTERM por defecto.
     }
     // Invalida la caché de procesos: el PID muerto desaparece en el próximo refresh.
-    inflight.delete('procs');
+    invalidate('procs');
     return { ok: true, pid: numericPid };
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
