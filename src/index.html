@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+  <title>System Monitor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="widget" class="widget" data-mode="dev">
+
+    <!-- ============ Cabecera (zona arrastrable) ============ -->
+    <header class="widget__header">
+      <span class="widget__dot"></span>
+      <h1 class="widget__title">SYS&nbsp;MONITOR</h1>
+
+      <button id="btn-pin" class="icon-btn icon-btn--active" title="Fijar sobre otras apps (always on top)" aria-label="Fijar ventana">&#128204;</button>
+      <button id="btn-mini" class="icon-btn" title="Modo Mini-Overlay (compacto)" aria-label="Modo mini">&#9635;</button>
+      <button id="btn-dev" class="icon-btn icon-btn--active" title="Modo Dev &amp; Diagnóstico" aria-label="Modo dev">&#9638;</button>
+      <button id="btn-charts" class="icon-btn" title="Modo Gráficas en tiempo real" aria-label="Modo gráficas">&#9636;</button>
+      <button id="btn-procs" class="icon-btn" title="Top Procesos (CPU)" aria-label="Modo procesos">&#9776;</button>
+      <button id="btn-close" class="icon-btn" title="Ocultar (queda en bandeja · Ctrl+Shift+M)" aria-label="Cerrar">&#10005;</button>
+    </header>
+
+    <!-- ============ MODO 1: Mini-Overlay ============ -->
+    <section id="mode-mini" class="mode mode--mini" hidden>
+      <button id="mini-cpu" class="strip strip--clickable" title="Expandir al modo completo">
+        <span class="strip__label">CPU</span>
+        <span class="strip__track"><span id="mini-cpu-bar" class="strip__fill strip__fill--cyan"></span></span>
+        <span class="strip__value"><span id="mini-cpu-value">--</span><small>%</small></span>
+      </button>
+
+      <button id="mini-ram" class="strip strip--clickable" title="Expandir al modo completo">
+        <span class="strip__label">RAM</span>
+        <span class="strip__track"><span id="mini-ram-bar" class="strip__fill strip__fill--magenta"></span></span>
+        <span class="strip__value"><span id="mini-ram-value">--</span><small>%</small></span>
+      </button>
+
+      <div class="strip">
+        <span class="strip__label">TEMP</span>
+        <span class="strip__track"><span id="mini-temp-bar" class="strip__fill strip__fill--amber"></span></span>
+        <span class="strip__value"><span id="mini-temp-value">--</span><small>°C</small></span>
+      </div>
+
+      <div class="strip">
+        <span class="strip__label">GPU</span>
+        <span class="strip__track"><span id="mini-gpu-bar" class="strip__fill strip__fill--violet"></span></span>
+        <span class="strip__value"><span id="mini-gpu-value">--</span><small>%</small></span>
+      </div>
+
+      <div class="mini-net">
+        <span class="mini-net__iface" id="mini-net-iface">--</span>
+        <span class="mini-net__speeds">
+          <span class="net-arrow" title="Descarga">&#9660;</span><span id="mini-net-down">--</span>
+          <span class="net-sep">|</span>
+          <span class="net-arrow" title="Subida">&#9650;</span><span id="mini-net-up">--</span>
+        </span>
+      </div>
+    </section>
+
+    <!-- ============ Cuerpo (Modos 2 y 3) ============ -->
+    <section class="widget__body">
+
+      <!-- MODO 2: Dev & Diagnóstico (vista completa) -->
+      <div id="tab-monitor" class="tab tab--active">
+        <article class="card" id="card-cpu">
+          <div class="card__row">
+            <span class="card__label">CPU</span>
+            <span class="card__value"><span id="cpu-value">--</span><small>%</small></span>
+          </div>
+          <div class="bar"><div id="cpu-bar" class="bar__fill"></div></div>
+        </article>
+
+        <article class="card" id="card-temp">
+          <div class="card__row">
+            <span class="card__label">CPU TEMP</span>
+            <span class="card__value card__value--temp"><span id="temp-value">--</span><small>°C</small></span>
+          </div>
+          <div class="bar"><div id="temp-bar" class="bar__fill bar__fill--temp"></div></div>
+          <div class="card__sub card__sub--warn" id="temp-admin-hint" hidden>&#9888; requiere ejecutar como administrador</div>
+          <div class="card__sub card__sub--dim" id="temp-none-hint" hidden>sin sensor térmico accesible en este equipo</div>
+        </article>
+
+        <article class="card" id="card-gpu">
+          <div class="card__row">
+            <span class="card__label">GPU</span>
+            <span class="card__value card__value--gpu"><span id="gpu-value">--</span><small>%</small></span>
+          </div>
+          <div class="bar"><div id="gpu-bar" class="bar__fill bar__fill--gpu"></div></div>
+          <div class="card__sub"><span id="gpu-detail">--</span></div>
+        </article>
+
+        <article class="card" id="card-ram">
+          <div class="card__row">
+            <span class="card__label">RAM</span>
+            <span class="card__value"><span id="ram-value">--</span><small>%</small></span>
+          </div>
+          <div class="bar"><div id="ram-bar" class="bar__fill"></div></div>
+          <div class="card__sub"><span id="ram-detail">-- / -- GB</span></div>
+        </article>
+
+        <article class="card">
+          <div class="card__row">
+            <span class="card__label">NET</span>
+            <span id="net-iface" class="card__iface"></span>
+            <span class="card__value card__value--net">
+              <span class="net-arrow" title="Descarga">&#9660;</span><span id="net-down">--</span>
+              <span class="net-sep">|</span>
+              <span class="net-arrow" title="Subida">&#9650;</span><span id="net-up">--</span>
+            </span>
+          </div>
+        </article>
+
+      </div>
+
+      <!-- MODO 4: Top Procesos (lista dedicada, sin recortes) -->
+      <div id="tab-procs" class="tab" hidden>
+        <article class="card card--processes card--processes-full">
+          <div class="card__row">
+            <span class="card__label">TOP 5 PROCESSES</span>
+            <button id="btn-refresh-procs" class="mini-btn" title="Refrescar ahora">&#8635; Refrescar</button>
+          </div>
+          <ul id="process-list-full" class="process-list" aria-live="polite"></ul>
+          <div id="list-empty-full" class="list-empty" hidden>…</div>
+          <div class="list-foot"><span id="list-foot-text-full"></span></div>
+        </article>
+      </div>
+
+      <!-- MODO 3: Gráficas (Chart.js en tiempo real) -->
+      <div id="tab-charts" class="tab" hidden>
+        <div class="chart-grid">
+          <article class="card card--chart">
+            <div class="card__row">
+              <span class="card__label">CPU %</span>
+              <span class="card__value card__value--sm"><span id="c-cpu">--</span><small>%</small></span>
+            </div>
+            <div class="chart-box"><canvas id="chart-cpu"></canvas></div>
+          </article>
+
+          <article class="card card--chart">
+            <div class="card__row">
+              <span class="card__label">TEMP °C</span>
+              <span class="card__value card__value--sm card__value--temp"><span id="c-temp">--</span><small>°C</small></span>
+            </div>
+            <div class="chart-box"><canvas id="chart-temp"></canvas></div>
+          </article>
+        </div>
+
+        <div class="chart-grid">
+          <article class="card card--chart">
+            <div class="card__row">
+              <span class="card__label">RAM %</span>
+              <span class="card__value card__value--sm"><span id="c-ram">--</span><small>%</small></span>
+            </div>
+            <div class="chart-box"><canvas id="chart-ram"></canvas></div>
+          </article>
+
+          <article class="card card--chart">
+            <div class="card__row">
+              <span class="card__label">GPU %</span>
+              <span class="card__value card__value--sm card__value--gpu"><span id="c-gpu">--</span><small>%</small></span>
+            </div>
+            <div class="chart-box"><canvas id="chart-gpu"></canvas></div>
+          </article>
+        </div>
+
+        <article class="card card--chart">
+          <div class="card__row">
+            <span class="card__label">NET KB/s</span>
+            <span class="card__value card__value--sm"><span id="c-net">--</span><small>KB/s</small></span>
+          </div>
+          <div class="chart-box"><canvas id="chart-net"></canvas></div>
+        </article>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="vendor/chart.umd.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

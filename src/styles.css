@@ -1,0 +1,616 @@
+/* ============================================================
+   Electron System Monitor — Cyberpunk / Dark minimal widget
+   3 modos: Mini-Overlay / Dev & Diagnóstico / Gráficas
+   ============================================================ */
+
+:root {
+  /* Ventana sólida: colores opacos, sin canal alpha (sin superficie D3D
+     compartida en el compositor → camino de render barato). */
+  --bg: #0a0c14;
+  --bg-card: #111521;
+  --border: rgba(0, 255, 229, 0.22);
+  --cyan: #00ffe5;
+  --cyan-dim: rgba(0, 255, 229, 0.45);
+  --magenta: #ff2bd6;
+  --violet: #9d6bff;
+  --amber: #ffb020;
+  --red: #ff3355;
+  --text: #d7fff9;
+  --text-dim: #5f7d7c;
+  --radius: 14px;
+  --font: "Segoe UI", "Consolas", "JetBrains Mono", monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--bg); /* Ventana sólida: mismo tono que el widget */
+  font-family: var(--font);
+  overflow: hidden;
+  user-select: none;
+  color: var(--text);
+}
+
+/* ---------- Contenedor del widget ---------- */
+.widget {
+  width: 340px;
+  height: 440px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  /* Sin backdrop-filter ni box-shadow externo: en ventana sólida ambos
+     fuerzan capas de composición extra sin beneficio visual. */
+}
+
+/* Modo Mini-Overlay: el widget se ajusta al contenido y la ventana se
+   redimensiona desde main.js — sin height fijo, el contenido no se recorta. */
+.widget[data-mode="mini"] {
+  height: auto;
+}
+
+/* ---------- Cabecera (zona arrastrable) ---------- */
+.widget__header {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(0, 255, 229, 0.06), transparent);
+}
+
+/* Sin animación infinita: un keyframe en loop impide que el compositor
+   entre en reposo y mantiene la GPU/CPU despierta innecesariamente. */
+.widget__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+}
+
+.widget__title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--cyan);
+  text-shadow: 0 0 6px var(--cyan-dim);
+}
+
+.icon-btn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  width: 24px;
+  height: 22px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.icon-btn:hover {
+  color: var(--cyan);
+  border-color: rgba(0, 255, 229, 0.4);
+}
+
+#btn-close:hover {
+  color: var(--red);
+  border-color: rgba(255, 51, 85, 0.4);
+}
+
+/* Botones de modo/fijado activos: resaltado persistente. */
+.icon-btn--active {
+  color: var(--cyan);
+  border-color: rgba(0, 255, 229, 0.35);
+  background: rgba(0, 255, 229, 0.08);
+}
+
+/* ---------- Cuerpo ---------- */
+.widget__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* El display:flex explícito pisa el [hidden] del UA sheet: sin esta regla,
+   el cuerpo seguiría visible en el modo Mini-Overlay. */
+.widget__body[hidden] {
+  display: none;
+}
+
+/* ---------- Tarjetas de métricas ---------- */
+.card {
+  background: var(--bg-card);
+  border: 1px solid rgba(0, 255, 229, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.card__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.card__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+.card__value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--cyan);
+  text-shadow: 0 0 8px var(--cyan-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.card__value small {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+
+.card__sub {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.card__hint {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+/* Temperatura: valor y barra en ámbar neutro de serie. */
+.card__value--temp {
+  color: var(--amber);
+  text-shadow: 0 0 8px rgba(255, 176, 32, 0.35);
+  font-size: 18px;
+}
+
+.bar__fill--temp {
+  background: linear-gradient(90deg, var(--amber), var(--red));
+  box-shadow: 0 0 6px rgba(255, 176, 32, 0.4);
+}
+
+/* Umbral térmico superado (≥80 °C): el renderer activa esta clase. */
+.card--temp-alert .card__value--temp {
+  color: var(--red);
+  text-shadow: 0 0 8px rgba(255, 51, 85, 0.55);
+}
+
+.card--temp-alert {
+  border-color: rgba(255, 51, 85, 0.45);
+}
+
+/* GPU: valor y barra en violeta. */
+.card__value--gpu,
+.card__value--sm.card__value--gpu {
+  color: var(--violet);
+  text-shadow: 0 0 8px rgba(157, 107, 255, 0.4);
+}
+
+.bar__fill--gpu {
+  background: linear-gradient(90deg, var(--violet), var(--magenta));
+  box-shadow: 0 0 6px rgba(157, 107, 255, 0.4);
+}
+
+/* CPU en alerta (≥85%) — el renderer activa esta clase */
+.card--alert .card__value {
+  color: var(--red);
+  text-shadow: 0 0 8px rgba(255, 51, 85, 0.55);
+}
+
+.card--alert {
+  border-color: rgba(255, 51, 85, 0.45);
+}
+
+/* ---------- Barras de progreso ---------- */
+.bar {
+  margin-top: 6px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.bar__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--cyan), var(--magenta));
+  box-shadow: 0 0 6px var(--cyan-dim);
+  /* Sin transition: cada ciclo reescribe style.width y una transición
+     obligaría a recálculos de estilo/compositor continuos. */
+}
+
+.card--alert .bar__fill {
+  background: linear-gradient(90deg, var(--amber), var(--red));
+  box-shadow: 0 0 6px rgba(255, 51, 85, 0.55);
+}
+
+/* ---------- Red ---------- */
+.card__iface {
+  font-size: 8px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card__value--net {
+  font-size: 13px;
+}
+
+.net-arrow {
+  color: var(--magenta);
+  font-size: 9px;
+  margin-right: 2px;
+}
+
+.net-arrow[title="Subida"] {
+  color: var(--cyan);
+}
+
+.net-sep {
+  color: var(--text-dim);
+  margin: 0 6px;
+}
+
+/* ---------- Lista de procesos ---------- */
+.card--processes {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* La lista vive SOLO en el modo Procesos: ocupa TODO el alto del widget. */
+.card--processes-full {
+  flex: 1;
+}
+
+.mini-btn {
+  -webkit-app-region: no-drag;
+  background: rgba(0, 255, 229, 0.08);
+  border: 1px solid rgba(0, 255, 229, 0.35);
+  border-radius: 5px;
+  color: var(--cyan);
+  font-family: var(--font);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.mini-btn:hover {
+  background: rgba(0, 255, 229, 0.18);
+}
+
+/* Aviso bajo la tarjeta de temperatura: sensor exige elevación. */
+.card__sub--warn {
+  color: var(--amber);
+  text-align: left;
+  font-size: 9px;
+  margin-top: 4px;
+}
+
+/* Aviso definitivo: el hardware no publica sensor térmico (n/a honesto). */
+.card__sub--dim {
+  color: var(--text-dim);
+  text-align: left;
+  font-size: 9px;
+  margin-top: 4px;
+}
+
+.process-list {
+  -webkit-app-region: no-drag;
+  list-style: none;
+  margin-top: 6px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyan-dim) transparent;
+}
+
+.process-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.process-list::-webkit-scrollbar-thumb {
+  background: var(--cyan-dim);
+  border-radius: 2px;
+}
+
+.process-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+/* El display:flex de la clase pisa el [hidden] del UA sheet: sin esta regla,
+   las filas sobrantes "ocultas" seguirían visibles. */
+.process-item[hidden] {
+  display: none;
+}
+
+.process-item:hover {
+  border-color: rgba(0, 255, 229, 0.3);
+  background: rgba(0, 255, 229, 0.05);
+}
+
+.process-item__name {
+  flex: 1;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.process-item__pid {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.process-item__cpu {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cyan);
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Botón Kill ---------- */
+.kill-btn {
+  background: rgba(255, 51, 85, 0.12);
+  border: 1px solid rgba(255, 51, 85, 0.45);
+  border-radius: 5px;
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.kill-btn:hover {
+  background: var(--red);
+  color: #fff;
+  box-shadow: 0 0 8px rgba(255, 51, 85, 0.7);
+}
+
+.kill-btn:disabled {
+  opacity: 0.4;
+  cursor: wait;
+}
+
+/* ---------- Pestañas ---------- */
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.tab[hidden] {
+  display: none;
+}
+
+/* ---------- Modo 1: Mini-Overlay ---------- */
+.mode {
+  flex: 1;
+  min-height: 0;
+}
+
+.mode[hidden] {
+  display: none;
+}
+
+.mode--mini {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 12px;
+}
+
+/* Botón-tira: clickable para expandir al modo completo. */
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--bg-card);
+  border: 1px solid rgba(0, 255, 229, 0.12);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--font);
+  text-align: left;
+  cursor: default;
+}
+
+.strip--clickable {
+  cursor: pointer;
+}
+
+.strip--clickable:hover {
+  border-color: rgba(0, 255, 229, 0.35);
+  background: rgba(0, 255, 229, 0.05);
+}
+
+.strip__label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  width: 34px;
+  flex-shrink: 0;
+}
+
+.strip__track {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.strip__fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+}
+
+.strip__fill--cyan {
+  background: linear-gradient(90deg, var(--cyan), var(--magenta));
+}
+
+.strip__fill--magenta {
+  background: linear-gradient(90deg, var(--magenta), var(--cyan));
+}
+
+.strip__fill--amber {
+  background: linear-gradient(90deg, var(--amber), var(--red));
+}
+
+.strip__fill--violet {
+  background: linear-gradient(90deg, var(--violet), var(--magenta));
+}
+
+.strip__value {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--cyan);
+  min-width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.strip__value small {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* Alerta dentro de las tiras mini (≥85% CPU / ≥80 °C). */
+.strip--alert {
+  border-color: rgba(255, 51, 85, 0.45);
+}
+
+.strip--alert .strip__value {
+  color: var(--red);
+}
+
+/* Fila de red compacta del mini overlay. */
+.mini-net {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.mini-net__iface {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-size: 8px;
+}
+
+.mini-net__speeds {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Gráficas (Chart.js) ---------- */
+.card--chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Rejilla 2x2 para las 4 gráficas porcentuales (CPU/TEMP/RAM/GPU); la red
+   queda a lo ancho completo debajo. Cada celda comparte la misma altura. */
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.chart-grid .card--chart {
+  margin: 0;
+}
+
+.chart-box {
+  position: relative;
+  height: 74px;
+}
+
+.chart-grid .chart-box {
+  height: 64px;
+}
+
+.chart-box canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+.card__value--sm {
+  font-size: 14px;
+}
+
+/* ---------- Pie de lista ---------- */
+.list-foot {
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.list-empty {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 6px 0;
+}
+
