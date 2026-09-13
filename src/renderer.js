@@ -22,10 +22,14 @@ const METRICS_INTERVAL_MS = 2500;  // Especificación: 2.5 s por ciclo.
 const MAX_POINTS = 20;             // Límite estricto del historial de gráficas.
 
 // Umbrales del guardián proactivo: TODAS las métricas cubiertas.
-const CPU_ALERT_THRESHOLD = 85;    // % de CPU sostenida.
-const TEMP_ALERT_THRESHOLD = 80;   // °C del paquete CPU.
-const GPU_ALERT_THRESHOLD = 90;    // % de GPU sostenida.
-const RAM_ALERT_THRESHOLD = 90;    // % de RAM sostenida.
+// Centralizados en un solo objeto para no repetir valores hardcodeados en el
+// guardián, el renderizado Dev y el mini overlay. Editar aquí afecta a todos.
+const THRESHOLDS = Object.freeze({
+  cpu: 85,   // % de CPU sostenida.
+  temp: 80,  // °C del paquete CPU.
+  gpu: 90,   // % de GPU sostenida.
+  ram: 90,   // % de RAM sostenida.
+});
 const ALERT_STREAK_FOR_NOTIFICATION = 2; // 2 lecturas consecutivas = ~5 s.
 const NOTIFY_COOLDOWN_MS = 60_000; // Anti-flood entre notificaciones.
 const TEMP_INVALID = -1;           // Sentinel: sensor no disponible.
@@ -319,7 +323,7 @@ function runGuardian(stats) {
   let gpuAlerting = false;
   let ramAlerting = false;
 
-  if (cpu > CPU_ALERT_THRESHOLD) {
+  if (cpu > THRESHOLDS.cpu) {
     guardian.cpuStreak += 1;
     cpuAlerting = guardian.cpuStreak >= ALERT_STREAK_FOR_NOTIFICATION;
   } else {
@@ -328,7 +332,7 @@ function runGuardian(stats) {
   }
 
   // TEMP_INVALID (-1): sensor ausente → nunca alerta térmica.
-  if (Number.isFinite(temp) && temp > TEMP_INVALID && temp >= TEMP_ALERT_THRESHOLD) {
+  if (Number.isFinite(temp) && temp > TEMP_INVALID && temp >= THRESHOLDS.temp) {
     guardian.tempStreak += 1;
     tempAlerting = guardian.tempStreak >= ALERT_STREAK_FOR_NOTIFICATION;
   } else {
@@ -337,7 +341,7 @@ function runGuardian(stats) {
   }
 
   // GPU_INVALID (-1): contadores ausentes (typeperf sin 1ª muestra) → nunca alerta.
-  if (gpu !== null && gpu >= GPU_ALERT_THRESHOLD) {
+  if (gpu !== null && gpu >= THRESHOLDS.gpu) {
     guardian.gpuStreak += 1;
     gpuAlerting = guardian.gpuStreak >= ALERT_STREAK_FOR_NOTIFICATION;
   } else {
@@ -345,7 +349,7 @@ function runGuardian(stats) {
     guardian.gpuFired = false;
   }
 
-  if (ram >= RAM_ALERT_THRESHOLD) {
+  if (ram >= THRESHOLDS.ram) {
     guardian.ramStreak += 1;
     ramAlerting = guardian.ramStreak >= ALERT_STREAK_FOR_NOTIFICATION;
   } else {
@@ -357,15 +361,15 @@ function runGuardian(stats) {
   // sujeta al cooldown global de 60 s por tipo.
   if (cpuAlerting && !guardian.cpuFired) {
     guardian.cpuFired = true;
-    notify('cpu', '⚠️ CPU Alert', `CPU load ${fmt1(cpu)}% sustained above ${CPU_ALERT_THRESHOLD}%`);
+    notify('cpu', '⚠️ CPU Alert', `CPU load ${fmt1(cpu)}% sustained above ${THRESHOLDS.cpu}%`);
   }
   if (tempAlerting && !guardian.tempFired) {
     guardian.tempFired = true;
-    notify('temp', '🌡️ Thermal Alert', `CPU temperature ${temp.toFixed(0)}°C sustained above ${TEMP_ALERT_THRESHOLD}°C`);
+    notify('temp', '🌡️ Thermal Alert', `CPU temperature ${temp.toFixed(0)}°C sustained above ${THRESHOLDS.temp}°C`);
   }
   if (gpuAlerting && !guardian.gpuFired) {
     guardian.gpuFired = true;
-    notify('gpu', '🎮 GPU Alert', `GPU usage ${fmt1(gpu)}% sustained above ${GPU_ALERT_THRESHOLD}%`);
+    notify('gpu', '🎮 GPU Alert', `GPU usage ${fmt1(gpu)}% sustained above ${THRESHOLDS.gpu}%`);
   }
   if (ramAlerting && !guardian.ramFired) {
     const { usedGb, totalGb } = stats.memory ?? {};
@@ -373,7 +377,7 @@ function runGuardian(stats) {
       Number.isFinite(usedGb) && Number.isFinite(totalGb)
         ? ` (${usedGb.toFixed(1)}/${totalGb.toFixed(1)} GB)`
         : '';
-    notify('ram', '🧠 RAM Alert', `Memory ${fmt1(ram)}% sustained above ${RAM_ALERT_THRESHOLD}%${detail}`);
+    notify('ram', '🧠 RAM Alert', `Memory ${fmt1(ram)}% sustained above ${THRESHOLDS.ram}%${detail}`);
   }
 }
 
@@ -385,7 +389,7 @@ function renderDevPanel(stats) {
 
   const cpu = clampPct(stats.cpu);
   const ram = clampPct(stats.memory?.percent);
-  const alert = cpu >= CPU_ALERT_THRESHOLD;
+  const alert = cpu >= THRESHOLDS.cpu;
 
   el.cpuValue.textContent = fmt1(cpu);
   el.cpuBar.style.width = `${cpu}%`;
@@ -397,7 +401,7 @@ function renderDevPanel(stats) {
   el.tempValue.textContent = formatTemp(temp);
   if (tempValid) {
     el.tempBar.style.width = `${clampPct(temp)}%`;
-    el.tempCard.classList.toggle('card--temp-alert', temp >= TEMP_ALERT_THRESHOLD);
+    el.tempCard.classList.toggle('card--temp-alert', temp >= THRESHOLDS.temp);
   } else {
     el.tempBar.style.width = '0%';
     el.tempCard.classList.remove('card--temp-alert');
@@ -415,7 +419,7 @@ function renderDevPanel(stats) {
 
   el.ramValue.textContent = fmt1(ram);
   el.ramBar.style.width = `${ram}%`;
-  el.ramCard?.classList.toggle('card--alert', ram >= RAM_ALERT_THRESHOLD);
+  el.ramCard?.classList.toggle('card--alert', ram >= THRESHOLDS.ram);
   const { usedGb, totalGb } = stats.memory ?? {};
   if (Number.isFinite(usedGb) && Number.isFinite(totalGb)) {
     el.ramDetail.textContent = `${usedGb.toFixed(2)} / ${totalGb.toFixed(2)} GB`;
@@ -437,21 +441,25 @@ function renderMini(stats) {
 
   el.miniCpuBar.style.width = `${cpu}%`;
   el.miniCpuValue.textContent = fmt1(cpu);
-  el.miniCpu.classList.toggle('strip--alert', cpu >= CPU_ALERT_THRESHOLD);
+  el.miniCpu.classList.toggle('strip--alert', cpu >= THRESHOLDS.cpu);
 
   el.miniRamBar.style.width = `${ram}%`;
   el.miniRamValue.textContent = fmt1(ram);
-  el.miniRam.classList.toggle('strip--alert', ram >= RAM_ALERT_THRESHOLD);
+  el.miniRam.classList.toggle('strip--alert', ram >= THRESHOLDS.ram);
 
   el.miniTempBar.style.width = tempValid ? `${clampPct(temp)}%` : '0%';
   el.miniTempValue.textContent = formatTemp(temp);
   el.miniTempBar.closest('.strip')?.classList.toggle(
     'strip--alert',
-    tempValid && temp >= TEMP_ALERT_THRESHOLD
+    tempValid && temp >= THRESHOLDS.temp
   );
 
   el.miniGpuBar.style.width = gpuValid ? `${clampPct(gpu)}%` : '0%';
   el.miniGpuValue.textContent = formatGpu(gpu);
+  el.miniGpuBar.closest('.strip')?.classList.toggle(
+    'strip--alert',
+    gpuValid && gpu >= THRESHOLDS.gpu
+  );
 
   el.miniNetIface.textContent = stats.network?.iface ?? '';
   el.miniNetDown.textContent = formatSpeed(stats.network?.rxBytesSec);

@@ -599,25 +599,41 @@ ipcMain.handle('get-top-processes', () =>
 
 /**
  * get-gpu-info: metadatos de la GPU (nombre, driver, VRAM) vía si.graphics().
- * Consulta lenta (~2 s): se resuelve UNA vez y se cachea para siempre.
+ * Consulta lenta (~2 s): se cachea con TTL + single-flight para no repetir el
+ * query si el renderer llama varias veces seguidas, pero refresca cada
+ * GPU_INFO_TTL_MS por si el hardware/driver cambia.
  */
-let gpuInfoPromise = null;
+const GPU_INFO_TTL_MS = 10 * 60 * 1000; // Refrescar 1 vez cada 10 min.
+let gpuInfoCache = null;
+let gpuInfoAt = 0;
+let gpuInfoInflight = null;
+
+function fetchGpuInfo() {
+  if (gpuInfoInflight) return gpuInfoInflight;
+  gpuInfoInflight = si.graphics()
+    .then((g) => {
+      const c = (g?.controllers ?? []).find((k) => k.model) ?? null;
+      return {
+        ok: true,
+        model: c ? String(c.model) : 'GPU',
+        vendor: c?.vendor ? String(c.vendor) : '',
+        vramMb: Number.isFinite(Number(c?.vram)) ? Number(c.vram) : null,
+        driver: c?.driverVersion ? String(c.driverVersion) : '',
+      };
+    })
+    .catch(() => ({ ok: false, model: 'GPU', vendor: '', vramMb: null, driver: '' }))
+    .then((result) => {
+      gpuInfoCache = result;
+      gpuInfoAt = Date.now();
+      return result;
+    })
+    .finally(() => { gpuInfoInflight = null; });
+  return gpuInfoInflight;
+}
+
 ipcMain.handle('get-gpu-info', () => {
-  if (!gpuInfoPromise) {
-    gpuInfoPromise = si.graphics()
-      .then((g) => {
-        const c = (g?.controllers ?? []).find((k) => k.model) ?? null;
-        return {
-          ok: true,
-          model: c ? String(c.model) : 'GPU',
-          vendor: c?.vendor ? String(c.vendor) : '',
-          vramMb: Number.isFinite(Number(c?.vram)) ? Number(c.vram) : null,
-          driver: c?.driverVersion ? String(c.driverVersion) : '',
-        };
-      })
-      .catch(() => ({ ok: false, model: 'GPU', vendor: '', vramMb: null, driver: '' }));
-  }
-  return gpuInfoPromise;
+  if (gpuInfoCache && Date.now() - gpuInfoAt < GPU_INFO_TTL_MS) return gpuInfoCache;
+  return fetchGpuInfo();
 });
 
 /**
