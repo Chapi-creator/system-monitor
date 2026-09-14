@@ -1,23 +1,20 @@
 'use strict';
 
 /**
- * tauri-bridge.js — Puente Tauri (WebView2) con la MISMA superficie que el
- * preload de Electron (window.api), para que src/renderer.js funcione sin
- * cambios en ambos runtimes.
+ * tauri-bridge.js — Puente Tauri (WebView2) que expone window.api al renderer,
+ * con validación de argumentos en profundidad antes de llegar a Rust.
  *
- * - Bajo Electron este archivo es inerte: el preload ya expuso window.api y
- *   window.__TAURI_INTERNALS__ no existe.
- * - Bajo Tauri define window.api sobre invoke() y sustituye window.Notification
- *   (WebView2 no implementa la API HTML5 de notificaciones) por el plugin
- *   nativo tauri-plugin-notification.
+ * - Define window.api sobre invoke().
+ * - Sustituye window.Notification (WebView2 no implementa la API HTML5 de
+ *   notificaciones) por el plugin nativo tauri-plugin-notification.
  */
 (function () {
   const internals = window.__TAURI_INTERNALS__;
-  if (!internals) return; // Electron: nada que hacer aquí.
+  if (!internals) return; // Fuera de Tauri: nada que hacer aquí.
 
   const invoke = internals.invoke;
 
-  /** Valida argumentos igual que el preload de Electron (defensa en profundidad). */
+  /** Valida argumentos antes de invocar a Rust (defensa en profundidad). */
   const toPid = (value) => {
     const n = Number(value);
     return Number.isInteger(n) && n > 0 ? n : null;
@@ -41,6 +38,38 @@
     setWidgetMode: (mode) => invoke('set_widget_mode', { mode: toMode(mode) }),
     /** Metadatos de GPU: modelo, driver, VRAM (cacheado en Rust). */
     getGpuInfo: () => invoke('get_gpu_info'),
+    /**
+     * Oculta la ventana a la bandeja SIN destruir el webview.
+     * NUNCA usar window.close() aquí: wry (WebView2) responde destruyendo el
+     * HWND del webview sin pasar por CloseRequested → ventana negra pegada.
+     */
+    hideWidget: () => invoke('hide_widget'),
+    /** Vuelve a mostrar el widget desde la bandeja. */
+    showWidget: () => invoke('show_widget'),
+    /**
+     * Suscripción a cambios de modo originados en el backend (el backend es la
+     * fuente de verdad): devuelve una función unlisten.
+     */
+    onModeChanged: (cb) => {
+      const handler = internals.transformCallback((event) => cb(event?.payload));
+      return invoke('plugin:event|listen', {
+        event: 'mode-changed',
+        target: { kind: 'Any' },
+        handler,
+      });
+    },
+  };
+
+  /**
+   * DEFENSA EN PROFUNDIDAD: en WebView2 wry responde a window.close()
+   * destruyendo el HWND del webview (add_WindowCloseRequested → DestroyWindow)
+   * SIN pasar por el CloseRequested de Tauri, así que prevent_close() + hide()
+   * nunca se ejecutan y la ventana queda NEGRA y pegada hasta reiniciar.
+   * Se re-mapea a hide_widget: mismo efecto visible (va a bandeja) sin destruir
+   * nada. Así ninguna ruta futura del renderer puede recaer en el bug.
+   */
+  window.close = () => {
+    invoke('hide_widget').catch(() => { /* sin ventana: nada que hacer */ });
   };
 
   /**

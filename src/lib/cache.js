@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * cache.js — Caché TTL con single-flight para consultas caras (WMI, etc.).
- * Extraído de main.js para poder testearlo en Node sin arrancar Electron.
+ * cache.js — Caché TTL con single-flight para consultas caras.
+ * Testeable en Node sin arrancar la app.
  *
  * - Dentro de la ventana TTL, las llamadas al MISMO key devuelven la MISMA
  *   promesa (single-flight): solo un query real está en vuelo a la vez.

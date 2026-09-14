@@ -2,7 +2,7 @@
 //!
 //!  - stats: CPU % (deltas de ticks del kernel vía sysinfo), RAM efectiva
 //!    (total − available), red diferencial por interfaz activa → 1 s.
-//!  - procs: top-5 por CPU → 10 s (equivale al TTL de 10 s de Electron).
+//!  - procs: top-5 por CPU → 10 s.
 //!  - gpu:   typeperf PERSISTENTE (contadores PDH por motor) → cada 2 s.
 //!  - temp:  WMI MSAcpi_ThermalZoneTemperature → cada 60 s, con estado
 //!    honesto de 3 niveles ('ok' | 'admin' | 'none').
@@ -17,13 +17,132 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use sysinfo::{Networks, ProcessesToUpdate, System};
+use sysinfo::{Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use wmi::COMLibrary;
 
 use crate::{round1, round2, sanitize, AppState, GpuInfo, ProcInfo, Snapshot};
 
+// ---------------------------------------------------------------------------
+// Pausa/reanudación de typeperf vía Win32 (NtSuspendProcess/NtResumeProcess).
+// Pausar el proceso (en vez de matarlo) conserva los contadores PDH abiertos:
+// al reanudar, el flujo continúa sin período de calibración.
+// ---------------------------------------------------------------------------
+#[cfg(windows)]
+mod winapi_pause {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtSuspendProcess(handle: isize) -> i32;
+        fn NtResumeProcess(handle: isize) -> i32;
+    }
+
+    /// Empaqueta las llamadas ntdll para un `Child`. El kernel cuenta las
+    /// suspensiones (cada NtSuspendProcess incrementa el contador por hilo y un
+    /// solo NtResumeProcess lo decrementa en 1): el llamador DEBE invocar
+    /// suspend()/resume() una sola vez por episodio de ocultación, no en bucle.
+    pub struct PauseGuard<'a> {
+        child: &'a mut Child,
+    }
+
+    impl<'a> PauseGuard<'a> {
+        pub fn new(child: &'a mut Child) -> Self {
+            Self { child }
+        }
+
+        pub fn suspend(&self) {
+            unsafe {
+                NtSuspendProcess(self.child.as_raw_handle() as isize);
+            }
+        }
+
+        pub fn resume(&self) {
+            unsafe {
+                NtResumeProcess(self.child.as_raw_handle() as isize);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod winapi_pause {
+    /// Stub no-Windows: sin pausa real (typeperf no existe fuera de Windows).
+    pub struct PauseGuard<'a> {
+        _child: &'a mut std::process::Child,
+    }
+
+    impl<'a> PauseGuard<'a> {
+        pub fn new(child: &'a mut std::process::Child) -> Self {
+            Self { _child: child }
+        }
+        pub fn suspend(&self) {}
+        pub fn resume(&self) {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job Object «kill-on-close»: si el widget muere de CUALQUIER forma (Quit de la
+// bandeja, crash, taskkill del usuario, panic = abort), el kernel mata a
+// typeperf con él. Windows NO mata hijos al morir el padre: sin esto, cada
+// ejecución deja un typeperf.exe huérfano muestreando PDH para siempre.
+// ---------------------------------------------------------------------------
+#[cfg(windows)]
+mod job_object {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Child, Command};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// Job del proceso vivo durante toda la app (se cierra solo al morir).
+    pub fn spawn_child_in_kill_on_close_job(cmd: &mut Command) -> std::io::Result<Child> {
+        unsafe {
+            let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok_limit = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok_limit == 0 {
+                let err = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(err);
+            }
+            let mut child = cmd.spawn()?;
+            let ok_assign = AssignProcessToJobObject(job, child.as_raw_handle() as _);
+            if ok_assign == 0 {
+                let err = std::io::Error::last_os_error();
+                let _ = child.kill();
+                let _ = child.wait();
+                CloseHandle(job);
+                return Err(err);
+            }
+            // El job NO se cierra manualmente: el kernel lo libera (matando a
+            // typeperf) cuando el proceso del widget termina, sin importar cómo.
+            Ok(child)
+        }
+    }
+}
+
+#[cfg(windows)]
+use job_object::spawn_child_in_kill_on_close_job;
+
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 const PROC_INTERVAL: Duration = Duration::from_secs(10);
+/// Sondeo de estado mientras el gating tiene la enumeración de procesos en pausa
+/// (ventana oculta o modo sin lista): reanuda el muestreo en ≤2 s al volver.
+const PROC_IDLE_POLL: Duration = Duration::from_secs(2);
 const TEMP_INTERVAL: Duration = Duration::from_secs(60);
 const GPU_MAX_RESTARTS: u32 = 3;
 const GPU_RESTART_DELAY: Duration = Duration::from_secs(10);
@@ -62,6 +181,16 @@ fn spawn_stats(state: Arc<AppState>) {
         let mut prev_time = Instant::now();
 
         loop {
+            // GATING por visibilidad: con el widget oculto en bandeja el renderer
+            // está pausado (document.hidden) y NADIE consume el snapshot. Muestrear
+            // a 1 Hz en ese estado es trabajo 100% desperdiciado (y era el consumo
+            // base dominante en oculto). Dormimos sin muestrear; al reaparecer, la
+            // ventana `elapsed` grande produce una 1ª lectura válida al instante.
+            if !state.visible.load(Ordering::SeqCst) {
+                thread::sleep(STATS_INTERVAL);
+                prev_time = Instant::now();
+                continue;
+            }
             let now = Instant::now();
             let elapsed = now.duration_since(prev_time).as_secs_f64().max(0.001);
             prev_time = now;
@@ -142,8 +271,25 @@ fn spawn_procs(state: Arc<AppState>) {
     thread::spawn(move || {
         let mut sys = System::new();
         loop {
+            // GATING: la enumeración de procesos es con diferencia la operación
+            // más cara del backend (cientos de procesos × syscalls por PID) y es
+            // la causa principal de los picos periódicos de CPU. Solo se hace si
+            // la ventana está visible Y el modo muestra la lista (dev | procs).
+            // Oculto en bandeja o en mini/charts → cero trabajo.
+            let mode_allows = matches!(state.mode.lock().unwrap().as_str(), "dev" | "procs");
+            if !(state.visible.load(Ordering::SeqCst) && mode_allows) {
+                thread::sleep(PROC_IDLE_POLL);
+                continue;
+            }
             sys.refresh_cpu_usage();
-            sys.refresh_processes(ProcessesToUpdate::All, true);
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                // Solo CPU + RAM: se omiten `exe` (resolución de ruta de imagen,
+                // carísima) y `disk_usage` (contadores E/S) de cada proceso.
+                // Esos dos campos son el grueso del pico y no se muestran.
+                ProcessRefreshKind::nothing().with_cpu().with_memory(),
+            );
 
             let total_mem = sys.total_memory() as f64;
             let mut top: Vec<ProcInfo> = sys
@@ -155,7 +301,7 @@ fn spawn_procs(state: Arc<AppState>) {
                     if pid == 0 {
                         return None;
                     }
-                    // Omite ruido de sistema (equivale al NOISE de Electron).
+                    // Omite ruido de sistema (System Idle Process, etc.).
                     let lower = name.to_lowercase();
                     if lower == "system idle process" || lower == "system interrupts" {
                         return None;
@@ -198,8 +344,31 @@ fn spawn_gpu(state: Arc<AppState>) {
                     return;
                 }
             };
+            // Blindaje extra: aunque algo escape del bucle sin wait(), el job
+            // garantiza que no queda typeperf vivo tras la muerte del widget.
             let stdout = child.stdout.take().expect("typeperf stdout");
             let reader = BufReader::new(stdout);
+
+            // GATING: mientras el widget está oculto, typeperf consume CPU y red
+            // de contadores para un dato que nadie lee. Se pausa con SUSPEND y se
+            // reanuda al volver (reconectar el flujo perdería la 1ª muestra PDH
+            // igual que un reinicio, así que pausar es más barato y simple).
+            let pause = winapi_pause::PauseGuard::new(&mut child);
+            // Suspend UNA sola vez por episodio: NtSuspendProcess apila contadores
+            // y un único resume() al reaparecer no recuperaría un bucle que
+            // suspendió cada 500 ms → typeperf quedaba congelado para siempre y
+            // la GPU mostraba el último % tras la primera ocultación.
+            let mut suspended = false;
+            while !state.visible.load(Ordering::SeqCst) {
+                if !suspended {
+                    pause.suspend();
+                    suspended = true;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            if suspended {
+                pause.resume();
+            }
 
             let mut column_types: Vec<String> = Vec::new();
             for line in reader.lines().map_while(Result::ok) {
@@ -228,13 +397,15 @@ fn spawn_gpu(state: Arc<AppState>) {
 fn spawn_typeperf() -> std::io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("typeperf")
-        .args([r"\GPU Engine(*)\Utilization Percentage", "-si", "2"])
+    let mut cmd = Command::new("typeperf");
+    cmd.args([r"\GPU Engine(*)\Utilization Percentage", "-si", "2"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    // Se lanza dentro de un Job Object kill-on-close: si el widget muere de
+    // cualquier forma, el kernel mata a typeperf con él (no queda huérfano).
+    spawn_child_in_kill_on_close_job(&mut cmd)
 }
 
 #[cfg(not(windows))]
@@ -318,6 +489,11 @@ struct ThermalZone {
 
 fn spawn_temp(state: Arc<AppState>) {
     thread::spawn(move || loop {
+        // GATING: la consulta WMI solo importa si alguien va a ver el dato.
+        if !state.visible.load(Ordering::SeqCst) {
+            thread::sleep(TEMP_INTERVAL);
+            continue;
+        }
         // is_elevated devuelve bool directo (chequeo por token, no `net session`).
         let elevated = is_elevated::is_elevated();
         let celsius = read_acpi_temp();

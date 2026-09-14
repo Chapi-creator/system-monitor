@@ -2,7 +2,7 @@
 
 /**
  * validate.js — Validación de PIDs para kill-process.
- * Extraído de main.js para poder testearlo en Node sin arrancar Electron.
+ * Testeable en Node sin arrancar la app.
  */
 
 /**

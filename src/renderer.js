@@ -15,7 +15,7 @@
 
 /* global Chart, SysMonMetrics */
 
-// Utilidades puras compartidas con main.js (módulo UMD cargado antes que este script).
+// Utilidades puras compartidas (módulo UMD cargado antes que este script).
 const { formatSpeed } = window.SysMonMetrics;
 
 const METRICS_INTERVAL_MS = 2500;  // Especificación: 2.5 s por ciclo.
@@ -146,11 +146,14 @@ function applyModeUI(mode) {
   el.btnProcs.classList.toggle('icon-btn--active', isProcs);
 }
 
-async function setMode(mode) {
+async function setMode(mode, fromBackend = false) {
   if (mode === activeMode) return;
   activeMode = mode;
   applyModeUI(mode);
-  window.api.setWidgetMode(mode); // El main redimensiona la ventana (mini 340x245).
+  // En la ruta backend-driven NO re-invocamos el comando: Rust ya fijó el modo
+  // (y su dedup evita re-emisiones). Re-invocar aquí causaba un eco
+  // renderer→backend→renderer que duplicaba cada evento 'mode-changed'.
+  if (!fromBackend) window.api.setWidgetMode(mode);
 
   if (mode === 'charts') {
     ensureCharts();
@@ -678,8 +681,13 @@ el.btnPin.addEventListener('click', async () => {
 });
 
 el.btnClose.addEventListener('click', () => {
-  stopPolling();
-  window.close(); // main.js la mantiene viva en la bandeja.
+  // Ocultar vía comando de Rust: window.close() está PROHIBIDO aquí. En
+  // WebView2 wry lo responde destruyendo el HWND del webview sin pasar por el
+  // CloseRequested de Tauri → ventana negra pegada que solo se arregla
+  // reiniciando. hide_widget solo oculta: la app sigue viva en la bandeja.
+  // El intervalo NO se detiene: pollTick ya no hace trabajo con el documento
+  // oculto, y detenerlo aquí congelaba el widget al volver a mostrarlo.
+  window.api?.hideWidget?.();
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -695,6 +703,14 @@ window.addEventListener('beforeunload', () => {
 window.api.getAlwaysOnTop().then((res) => {
   if (res?.ok) el.btnPin.classList.toggle('icon-btn--active', Boolean(res.pinned));
 }).catch(() => {});
+
+// El backend es la fuente de verdad del modo: si el modo cambia sin pasar por
+// la UI (llamada IPC directa de tests, atajos futuros), el renderer sigue.
+// setMode ya aplicó el cambio cuando el clic viene de aquí, así que el guard
+// evita trabajo duplicado.
+window.api.onModeChanged?.((mode) => {
+  if (typeof mode === 'string' && mode !== activeMode) setMode(mode, true);
+});
 
 // Arranque.
 ensureModeBootstrap();

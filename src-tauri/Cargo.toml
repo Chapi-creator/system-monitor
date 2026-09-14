@@ -25,6 +25,18 @@ sysinfo = "0.33"
 wmi = "0.17"
 is_elevated = "0.1"
 
+# Job Object (kill-on-close) para no dejar typeperf huérfano al salir.
+# 0.61 ya está en el árbol de dependencias de tauri: cero bins nuevos.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+] }
+
+[dev-dependencies]
+# tauri::test (mock_app / MockRuntime) para probar comandos y eventos sin GUI.
+tauri = { version = "2", features = ["test"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

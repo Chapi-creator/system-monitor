@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * metrics.js — Utilidades PURAS de cálculo/formato compartidas entre el proceso
- * principal (main.js) y el renderer (renderer.js).
+ * metrics.js — Utilidades PURAS de cálculo/formato compartidas entre el
+ * backend (Rust) y el renderer (renderer.js).
  *
  * Formato UMD:
- *  - En Node/Electron (main) se exporta vía module.exports → require(...).
- *  - En el navegador (renderer de Electron) se cuelga en window.SysMonMetrics.
- * Así las mismas funciones se pueden testear con node:test sin arrancar Electron
- * y se usan en vivo desde ambos lados sin duplicar código.
+ *  - En Node se exporta vía module.exports → require(...).
+ *  - En el navegador (WebView del widget) se cuelga en window.SysMonMetrics.
+ * Así las mismas funciones se pueden testear con node:test sin arrancar la app
+ * y se usan en vivo desde el renderer sin duplicar código.
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {

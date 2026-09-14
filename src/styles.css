@@ -1,5 +1,5 @@
 /* ============================================================
-   Electron System Monitor — Cyberpunk / Dark minimal widget
+   System Monitor — Cyberpunk / Dark minimal widget
    3 modos: Mini-Overlay / Dev & Diagnóstico / Gráficas
    ============================================================ */
 
@@ -50,7 +50,8 @@ body {
 }
 
 /* Modo Mini-Overlay: el widget se ajusta al contenido y la ventana se
-   redimensiona desde main.js — sin height fijo, el contenido no se recorta. */
+   redimensiona desde el backend (set_widget_mode) — sin height fijo, el
+   contenido no se recorta. */
 .widget[data-mode="mini"] {
   height: auto;
 }

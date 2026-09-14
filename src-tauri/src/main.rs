@@ -1,11 +1,11 @@
 //! main.rs — Proceso principal del widget en Tauri (Rust).
 //!
-//! Port de la versión Electron (main.js) a Tauri v2 + WebView2:
+//! Funcionalidad:
 //!  - Ventana frameless, always-on-top, 340×440 (mini 340×245).
 //!  - Bandeja (Tray) + atajo global Ctrl+Shift+M para mostrar/ocultar.
 //!  - Instancia única (segundo lanzamiento enfoca la ventana existente).
-//!  - 7 comandos IPC idénticos a los de Electron para que el renderer
-//!    (src/*) funcione sin cambios, vía src/tauri-bridge.js.
+//!  - 7 comandos IPC consumidos por el renderer
+//!    (src/*) vía src/tauri-bridge.js.
 //!  - Muestreo en segundo plano: CPU/RAM/red (sysinfo), GPU (typeperf/PDH),
 //!    temperatura CPU (WMI MSAcpi_ThermalZoneTemperature) con estado honesto
 //!    de 3 niveles ('ok' | 'admin' | 'none') y metadatos de GPU (WMI).
@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, LogicalSize, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, Runtime, State, WindowEvent};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 // ---------------------------------------------------------------------------
@@ -32,8 +32,7 @@ const WIDGET_W: f64 = 340.0;
 const WIDGET_H: f64 = 440.0;
 const MINI_H: f64 = 245.0;
 
-/// Snapshot de métricas con los MISMOS nombres que devolvía Electron
-/// (camelCase) para no tocar el renderer.
+/// Snapshot de métricas (camelCase) para el renderer.
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryInfo {
@@ -102,6 +101,8 @@ pub struct AppState {
     pub gpu_info: Mutex<GpuInfoCache>,
     pub pinned: AtomicBool,
     pub mode: Mutex<String>,
+    /// Ventana visible: los hilos de muestreo caros se gatean con esto.
+    pub visible: AtomicBool,
 }
 
 impl Default for AppState {
@@ -122,6 +123,7 @@ impl Default for AppState {
             }),
             pinned: AtomicBool::new(true),
             mode: Mutex::new("dev".into()),
+            visible: AtomicBool::new(true),
         }
     }
 }
@@ -144,17 +146,21 @@ fn sanitize(s: &str) -> String {
 
 fn toggle_widget(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        if win.is_visible().unwrap_or(false) {
-            let _ = win.hide();
-        } else {
+        let will_show = !win.is_visible().unwrap_or(false);
+        if will_show {
             let _ = win.show();
             let _ = win.set_focus();
+        } else {
+            let _ = win.hide();
         }
+        app.state::<Arc<AppState>>()
+            .visible
+            .store(will_show, Ordering::SeqCst);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Comandos IPC (misma superficie que Electron: getSystemStats, getTopProcesses,
+// Comandos IPC (getSystemStats, getTopProcesses,
 // getGpuInfo, killProcess, toggleAlwaysOnTop, getAlwaysOnTop, setWidgetMode).
 // ---------------------------------------------------------------------------
 #[tauri::command]
@@ -189,11 +195,23 @@ async fn get_gpu_info(state: State<'_, Arc<AppState>>) -> Result<Value, ()> {
     Ok(serde_json::to_value(&cache.info).unwrap_or(json!({ "ok": false })))
 }
 
+/// `Option<i64>`: el puente (tauri-bridge.js) manda `null` para PIDs no
+/// numéricos/inválidos. Con `i64` pelado la deserialización fallaría y el IPC
+/// rechazaría en vez de devolver el JSON `{ ok: false }` esperado.
 #[tauri::command]
-fn kill_process(pid: i64) -> Value {
-    // Validación equivalente a validatePid(): entero positivo y distinto del widget.
-    if pid <= 0 || pid as u32 == std::process::id() {
+fn kill_process(pid: Option<i64>) -> Value {
+    // Validación equivalente a validatePid(): entero positivo, distinto del
+    // widget y no crítico del sistema.
+    let Some(pid) = pid.filter(|p| *p > 0) else {
         return json!({ "ok": false, "error": "Invalid PID" });
+    };
+    if pid as u32 == std::process::id() {
+        return json!({ "ok": false, "error": "Refusing to kill the widget itself" });
+    }
+    // PID 4 = System (Windows): núcleo del SO, nunca matable desde la IU.
+    #[cfg(windows)]
+    if pid == 4 {
+        return json!({ "ok": false, "error": "Refusing to kill a system-critical process" });
     }
     // Windows: taskkill /F /T corta árboles de proceso (process.kill no).
     #[cfg(windows)]
@@ -227,7 +245,7 @@ fn kill_process(pid: i64) -> Value {
 }
 
 #[tauri::command]
-fn toggle_always_on_top(app: AppHandle, state: State<'_, Arc<AppState>>) -> Value {
+fn toggle_always_on_top<R: Runtime>(app: AppHandle<R>, state: State<'_, Arc<AppState>>) -> Value {
     let new = !state.pinned.load(Ordering::SeqCst);
     let ok = app
         .get_webview_window("main")
@@ -242,17 +260,70 @@ fn get_always_on_top(state: State<'_, Arc<AppState>>) -> Value {
     json!({ "ok": true, "pinned": state.pinned.load(Ordering::SeqCst) })
 }
 
+/// `Option<String>` por la misma razón que kill_process: el puente manda
+/// `null` para modos inválidos y el contrato es devolver `{ ok: false }`.
+/// Genérico sobre `R: Runtime` para poder probarlo con el MockRuntime de
+/// tauri::test sin GUI (el wrapper del macro infiere R en producción).
 #[tauri::command]
-fn set_widget_mode(mode: String, app: AppHandle, state: State<'_, Arc<AppState>>) -> Value {
-    if !matches!(mode.as_str(), "dev" | "mini" | "charts" | "procs") {
+fn set_widget_mode<R: Runtime>(
+    mode: Option<String>,
+    app: AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Value {
+    let Some(mode) = mode.filter(|m| matches!(m.as_str(), "dev" | "mini" | "charts" | "procs"))
+    else {
         return json!({ "ok": false, "error": "Invalid mode" });
+    };
+    // Dedup idempotente: re-fijar el modo vigente NO re-emite ni re-dimensiona.
+    // Sin esto, el eco renderer→backend (el renderer que sigue al evento
+    // re-invocando el comando) duplicaba cada emisión 'mode-changed'.
+    {
+        let mut current = state.mode.lock().unwrap();
+        if *current == mode {
+            return json!({ "ok": true, "mode": mode });
+        }
+        *current = mode.clone();
     }
     let (w, h) = if mode == "mini" { (WIDGET_W, MINI_H) } else { (WIDGET_W, WIDGET_H) };
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_size(LogicalSize::new(w, h));
     }
-    *state.mode.lock().unwrap() = mode.clone();
+    // El backend es la fuente de verdad del modo: una llamada IPC directa
+    // (tests E2E, atajos futuros) debe reflejarse en la UI del renderer.
+    // Sin esto, el renderer queda desincronizado y mini/charts/procs dejan
+    // de renderizarse aunque la ventana cambie de tamaño.
+    let _ = app.emit("mode-changed", mode.clone());
     json!({ "ok": true, "mode": mode })
+}
+
+/// Oculta la ventana a la bandeja SIN destruir el webview.
+///
+/// El botón ✕ del renderer DEBE invocar este comando y NUNCA `window.close()`:
+/// wry responde a `window.close()` destruyendo el HWND de WebView2
+/// (add_WindowCloseRequested → DestroyWindow) sin pasar por el handler de
+/// `CloseRequested` de Tauri, así que `prevent_close()` + `hide()` nunca se
+/// ejecutan y la ventana queda NEGRA y pegada hasta reiniciar la app.
+#[tauri::command]
+fn hide_widget<R: Runtime>(app: AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    app.state::<Arc<AppState>>()
+        .visible
+        .store(false, Ordering::SeqCst);
+}
+
+/// Espejo de hide_widget para volver desde la bandeja (equivalente al clic
+/// del tray / Ctrl+Shift+M, disponible también por IPC para tests).
+#[tauri::command]
+fn show_widget<R: Runtime>(app: AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    app.state::<Arc<AppState>>()
+        .visible
+        .store(true, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +336,9 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
+                app.state::<Arc<AppState>>()
+                    .visible
+                    .store(true, Ordering::SeqCst);
             }
         }))
         .plugin(tauri_plugin_notification::init())
@@ -292,6 +366,11 @@ fn main() {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+                window
+                    .app_handle()
+                    .state::<Arc<AppState>>()
+                    .visible
+                    .store(false, Ordering::SeqCst);
             }
             _ => {}
         })
@@ -302,10 +381,260 @@ fn main() {
             kill_process,
             toggle_always_on_top,
             get_always_on_top,
-            set_widget_mode
+            set_widget_mode,
+            hide_widget,
+            show_widget
         ])
         .run(tauri::generate_context!())
         .expect("error while running System Monitor Widget");
+}
+
+#[cfg(test)]
+mod mode_changed_tests {
+    use super::*;
+    use serde_json::json;
+    use tauri::test::{mock_app, mock_builder, noop_assets, mock_context};
+    use tauri::{Listener, Manager};
+
+    /// App mock con el MISMO estado global que la app real (AppState por defecto
+    /// = modo 'dev', visible). El contexto mock usa los assets noop: sin webview
+    /// real, perfecto para verificar la emisión del evento.
+    fn test_app() -> tauri::App<tauri::test::MockRuntime> {
+        mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app")
+    }
+
+    #[test]
+    fn modo_valido_emite_mode_changed_y_actualiza_estado() {
+        let app = test_app();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        let payload = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = payload.clone();
+        app.listen("mode-changed", move |event| {
+            sink.lock().unwrap().push(event.payload().to_string());
+        });
+
+        let res = set_widget_mode(
+            Some("mini".into()),
+            app.handle().clone(),
+            app.state::<Arc<AppState>>(),
+        );
+
+        assert_eq!(res, json!({ "ok": true, "mode": "mini" }));
+        assert_eq!(*state.mode.lock().unwrap(), "mini");
+        assert_eq!(
+            payload.lock().unwrap().as_slice(),
+            ["\"mini\""],
+            "el evento debe emitirse exactamente una vez con el modo como payload"
+        );
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn modo_invalido_no_emite_ni_cambia_estado() {
+        let app = test_app();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        let hits = Arc::new(Mutex::new(0usize));
+        let sink = hits.clone();
+        app.listen("mode-changed", move |_| {
+            *sink.lock().unwrap() += 1;
+        });
+
+        // null como el puente manda para modos inválidos (kill_process-style).
+        let res = set_widget_mode(None, app.handle().clone(), app.state::<Arc<AppState>>());
+        assert_eq!(res, json!({ "ok": false, "error": "Invalid mode" }));
+
+        // Un modo fuera de la whitelist tampoco emite.
+        let res = set_widget_mode(
+            Some("fullscreen".into()),
+            app.handle().clone(),
+            app.state::<Arc<AppState>>(),
+        );
+        assert_eq!(res, json!({ "ok": false, "error": "Invalid mode" }));
+
+        assert_eq!(*hits.lock().unwrap(), 0, "ningún evento para modos inválidos");
+        assert_eq!(*state.mode.lock().unwrap(), "dev", "el modo no cambia");
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn cada_modo_valido_emite_su_propio_payload() {
+        let app = test_app();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        let payload = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = payload.clone();
+        app.listen("mode-changed", move |event| {
+            sink.lock().unwrap().push(event.payload().to_string());
+        });
+
+        for modo in ["mini", "charts", "procs", "dev"] {
+            let res = set_widget_mode(
+                Some(modo.into()),
+                app.handle().clone(),
+                app.state::<Arc<AppState>>(),
+            );
+            assert_eq!(res, json!({ "ok": true, "mode": modo }));
+        }
+
+        assert_eq!(
+            payload.lock().unwrap().as_slice(),
+            ["\"mini\"", "\"charts\"", "\"procs\"", "\"dev\""],
+            "un evento por cambio, en orden"
+        );
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn mock_app_arranca_con_estado_por_defecto() {
+        let app = mock_app();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        assert_eq!(*state.mode.lock().unwrap(), "dev");
+        assert!(state.visible.load(Ordering::SeqCst));
+        app.cleanup_before_exit();
+    }
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::*;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    /// App mock con una ventana "main" real (dispatcher mock: hide/show son
+    /// no-ops, así que lo verificable es el ESTADO visible del AppState y que
+    /// los comandos no entran en pánico; la visibilidad Win32 real se cubre
+    /// en el E2E con win-visibility.ps1).
+    fn test_app_with_window() -> tauri::App<tauri::test::MockRuntime> {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html".into()))
+            .build()
+            .expect("mock main window");
+        app
+    }
+
+    #[test]
+    fn hide_widget_marca_invisible_y_show_widget_lo_restaura() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        assert!(state.visible.load(Ordering::SeqCst), "arranca visible");
+
+        hide_widget(app.handle().clone());
+        assert!(!state.visible.load(Ordering::SeqCst), "hide → visible=false");
+
+        show_widget(app.handle().clone());
+        assert!(state.visible.load(Ordering::SeqCst), "show → visible=true");
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn transiciones_repetidas_son_idempotentes_y_coherentes() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        // Doble hide seguido de doble show: el flag debe acabar en true y las
+        // repeticiones no deben corromper el estado (los gating threads leen
+        // este flag cada 500 ms-2 s: un estado inconsistente congela métricas).
+        hide_widget(app.handle().clone());
+        hide_widget(app.handle().clone());
+        assert!(!state.visible.load(Ordering::SeqCst));
+        show_widget(app.handle().clone());
+        show_widget(app.handle().clone());
+        assert!(state.visible.load(Ordering::SeqCst));
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn comandos_no_entran_en_panico_sin_ventana() {
+        // Robustez: si la ventana aún no existe (o ya murió), los guards
+        // `if let Some(win)` deben degradar con gracia, no crashear.
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        hide_widget(app.handle().clone());
+        assert!(!state.visible.load(Ordering::SeqCst), "estado cambia igual");
+        show_widget(app.handle().clone());
+        assert!(state.visible.load(Ordering::SeqCst));
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn toggle_always_on_top_invierte_y_reporta_el_estado() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        assert!(state.pinned.load(Ordering::SeqCst), "arranca fijado");
+
+        let res = toggle_always_on_top(app.handle().clone(), app.state::<Arc<AppState>>());
+        assert_eq!(res, json!({ "ok": true, "pinned": false }));
+        assert!(!state.pinned.load(Ordering::SeqCst));
+
+        let res = toggle_always_on_top(app.handle().clone(), app.state::<Arc<AppState>>());
+        assert_eq!(res, json!({ "ok": true, "pinned": true }));
+
+        let res = get_always_on_top(app.state::<Arc<AppState>>());
+        assert_eq!(res, json!({ "ok": true, "pinned": true }));
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn kill_process_rechaza_pids_peligrosos_sin_ejecutar_nada() {
+        // Sin ventana ni estado gestionado: estos caminos devuelven ANTES de
+        // tocar taskkill, así que son seguros de probar en cualquier app.
+        let res = kill_process(None); // lo que manda el puente con PID inválido
+        assert_eq!(res, json!({ "ok": false, "error": "Invalid PID" }));
+
+        let res = kill_process(Some(0));
+        assert_eq!(res, json!({ "ok": false, "error": "Invalid PID" }));
+
+        let res = kill_process(Some(-3));
+        assert_eq!(res, json!({ "ok": false, "error": "Invalid PID" }));
+
+        let self_pid = std::process::id() as i64;
+        let res = kill_process(Some(self_pid));
+        assert_eq!(
+            res,
+            json!({ "ok": false, "error": "Refusing to kill the widget itself" })
+        );
+
+        // Solo en Windows: PID 4 = System.
+        #[cfg(windows)]
+        {
+            let res = kill_process(Some(4));
+            assert_eq!(
+                res,
+                json!({ "ok": false, "error": "Refusing to kill a system-critical process" })
+            );
+        }
+    }
+
+    #[test]
+    fn utilidades_sanitize_y_round() {
+        // sanitize: bytes nulos/CR/LF de nombres de proceso maliciosos.
+        assert_eq!(sanitize("explorer.exe"), "explorer.exe");
+        assert_eq!(sanitize("bad\0name"), "bad name");
+        assert_eq!(sanitize("weird\r\nname"), "weird  name");
+        assert_eq!(sanitize("  padded  "), "padded");
+
+        assert_eq!(round1(23.44), 23.4);
+        assert_eq!(round1(23.45), 23.5); // .round() de Rust: half away from zero
+        assert_eq!(round2(7.006), 7.01);
+        assert_eq!(round1(-1.25), -1.3);
+    }
 }
 
 /// Bandeja del sistema: clic izquierdo alterna mostrar/ocultar; menú contextual
@@ -318,7 +647,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .build()?;
 
     let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
-        // Fallback: icono PNG de 16×16 embebido (misma imagen que Electron).
+        // Fallback: icono PNG de 16×16 embebido.
         tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
             .expect("embedded tray icon")
     });

@@ -2,8 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <!-- connect-src ipc: http://ipc.localhost es el canal de invoke() de Tauri;
-       en Electron estas fuentes simplemente no se usan. -->
+  <!-- connect-src ipc: http://ipc.localhost es el canal de invoke() de Tauri. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost;" />
   <title>System Monitor</title>
   <link rel="stylesheet" href="styles.css" />
@@ -12,8 +11,8 @@
   <main id="widget" class="widget" data-mode="dev">
 
     <!-- ============ Cabecera (zona arrastrable) ============ -->
-    <!-- data-tauri-drag-region: WebView2 no soporta -webkit-app-region, así que
-         Tauri arrastra por atributo; en Electron es un atributo inerte. -->
+  <!-- data-tauri-drag-region: WebView2 no soporta -webkit-app-region,
+       así que Tauri arrastra por atributo. -->
     <header class="widget__header" data-tauri-drag-region>
       <span class="widget__dot" data-tauri-drag-region></span>
       <h1 class="widget__title" data-tauri-drag-region>SYS&nbsp;MONITOR</h1>
