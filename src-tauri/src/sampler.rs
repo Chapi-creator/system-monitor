@@ -188,7 +188,11 @@ fn spawn_stats(state: Arc<AppState>) {
             // ventana `elapsed` grande produce una 1ª lectura válida al instante.
             if !state.visible.load(Ordering::SeqCst) {
                 thread::sleep(STATS_INTERVAL);
-                prev_time = Instant::now();
+                // prev_time NO se toca aquí: al reaparecer, `elapsed` cubre todo
+                // el período oculto y los deltas de red/CPU se dividen entre esa
+                // ventana → 1ª lectura = promedio real. Si se reseteara aquí,
+                // esos mismos bytes se dividirían por ~16 ms → pico falso de
+                // velocidad de red gigante al restaurar el widget.
                 continue;
             }
             let now = Instant::now();

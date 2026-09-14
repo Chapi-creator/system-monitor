@@ -144,19 +144,36 @@ fn sanitize(s: &str) -> String {
     s.replace(['\0', '\r', '\n'], " ").trim().to_string()
 }
 
-fn toggle_widget(app: &AppHandle) {
+/// Fuente de verdad de la visibilidad: actualiza el flag que leen los gating
+/// threads del sampler Y notifica al renderer.
+///
+/// El evento es imprescindible porque WebView2 NO propaga `document.hidden`
+/// cuando la ventana anfitriona se oculta: sin él, el renderer seguía
+/// haciendo IPC + DOM + Chart cada 2.5 s mientras el widget estaba en bandeja.
+fn set_visible_state<R: Runtime>(app: &AppHandle<R>, visible: bool) {
+    app.state::<Arc<AppState>>()
+        .visible
+        .store(visible, Ordering::SeqCst);
+    let _ = app.emit("visibility-changed", visible);
+}
+
+fn toggle_widget<R: Runtime>(app: &AppHandle<R>) {
+    // Estado-driven (no win.is_visible()): el flag es la única fuente de
+    // verdad, todas las transiciones pasan por aquí, y así el toggle es
+    // determinista incluso si la consulta del dispatcher se desincroniza.
+    let will_show = !app
+        .state::<Arc<AppState>>()
+        .visible
+        .load(Ordering::SeqCst);
     if let Some(win) = app.get_webview_window("main") {
-        let will_show = !win.is_visible().unwrap_or(false);
         if will_show {
             let _ = win.show();
             let _ = win.set_focus();
         } else {
             let _ = win.hide();
         }
-        app.state::<Arc<AppState>>()
-            .visible
-            .store(will_show, Ordering::SeqCst);
     }
+    set_visible_state(app, will_show);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +325,7 @@ fn hide_widget<R: Runtime>(app: AppHandle<R>) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
-    app.state::<Arc<AppState>>()
-        .visible
-        .store(false, Ordering::SeqCst);
+    set_visible_state(&app, false);
 }
 
 /// Espejo de hide_widget para volver desde la bandeja (equivalente al clic
@@ -321,9 +336,7 @@ fn show_widget<R: Runtime>(app: AppHandle<R>) {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    app.state::<Arc<AppState>>()
-        .visible
-        .store(true, Ordering::SeqCst);
+    set_visible_state(&app, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,9 +349,7 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
-                app.state::<Arc<AppState>>()
-                    .visible
-                    .store(true, Ordering::SeqCst);
+                set_visible_state(app, true);
             }
         }))
         .plugin(tauri_plugin_notification::init())
@@ -366,11 +377,7 @@ fn main() {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
-                window
-                    .app_handle()
-                    .state::<Arc<AppState>>()
-                    .visible
-                    .store(false, Ordering::SeqCst);
+                set_visible_state(window.app_handle(), false);
             }
             _ => {}
         })
@@ -506,7 +513,7 @@ mod mode_changed_tests {
 mod window_state_tests {
     use super::*;
     use tauri::test::{mock_builder, mock_context, noop_assets};
-    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
     /// App mock con una ventana "main" real (dispatcher mock: hide/show son
     /// no-ops, así que lo verificable es el ESTADO visible del AppState y que
@@ -634,6 +641,50 @@ mod window_state_tests {
         assert_eq!(round1(23.45), 23.5); // .round() de Rust: half away from zero
         assert_eq!(round2(7.006), 7.01);
         assert_eq!(round1(-1.25), -1.3);
+    }
+
+    #[test]
+    fn hide_y_show_emiten_visibility_changed_con_payload_bool() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        let payload = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = payload.clone();
+        app.listen("visibility-changed", move |event| {
+            sink.lock().unwrap().push(event.payload().to_string());
+        });
+
+        hide_widget(app.handle().clone());
+        assert_eq!(*payload.lock().unwrap(), ["false".to_string()]);
+
+        show_widget(app.handle().clone());
+        assert_eq!(
+            *payload.lock().unwrap(),
+            ["false".to_string(), "true".to_string()]
+        );
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn toggle_widget_emite_un_evento_por_transicion_real() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        let payload = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = payload.clone();
+        app.listen("visibility-changed", move |event| {
+            sink.lock().unwrap().push(event.payload().to_string());
+        });
+
+        // Arranca visible → el primer toggle oculta, el segundo muestra.
+        toggle_widget(app.handle());
+        toggle_widget(app.handle());
+        assert_eq!(
+            *payload.lock().unwrap(),
+            ["false".to_string(), "true".to_string()]
+        );
+        assert!(state.visible.load(Ordering::SeqCst));
+        app.cleanup_before_exit();
     }
 }
 

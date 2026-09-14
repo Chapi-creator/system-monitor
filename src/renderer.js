@@ -596,7 +596,7 @@ async function fetchGpuInfo() {
 let metricsTimer = null;
 
 async function pollTick() {
-  if (document.hidden) return; // Widget oculto en bandeja: cero trabajo.
+  if (backendHidden || document.hidden) return; // Widget oculto en bandeja: cero trabajo.
   try {
     const stats = await window.api.getSystemStats();
     if (!stats?.ok) return;
@@ -691,7 +691,17 @@ el.btnClose.addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) pollTick(); // refresco inmediato al salir de la bandeja
+  if (!document.hidden && !backendHidden) pollTick(); // refresco inmediato al salir de la bandeja
+});
+
+// WebView2 NO propaga document.hidden cuando la ventana anfitriona se oculta,
+// así que el renderer sigue el evento del backend (fuente de verdad): oculto
+// en bandeja, pollTick sale inmediatamente = cero IPC/DOM/Chart. Al volver,
+// un refresco inmediato restaura los datos sin esperar el próximo tick.
+let backendHidden = false;
+window.api.onVisibilityChanged?.((visible) => {
+  backendHidden = !visible;
+  if (visible && !document.hidden) pollTick();
 });
 
 window.addEventListener('beforeunload', () => {

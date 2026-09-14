@@ -47,6 +47,18 @@
     /** Vuelve a mostrar el widget desde la bandeja. */
     showWidget: () => invoke('show_widget'),
     /**
+     * Suscripción a cambios de visibilidad reales (backend = fuente de verdad).
+     * Devuelve una promesa que resuelve al eventId para poder hacer unlisten.
+     */
+    onVisibilityChanged: (cb) => {
+      const handler = internals.transformCallback((event) => cb(event?.payload));
+      return invoke('plugin:event|listen', {
+        event: 'visibility-changed',
+        target: { kind: 'Any' },
+        handler,
+      });
+    },
+    /**
      * Suscripción a cambios de modo originados en el backend (el backend es la
      * fuente de verdad): devuelve una función unlisten.
      */
