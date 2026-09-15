@@ -177,6 +177,8 @@ async function adjustThreshold(kind, delta) {
 
 /** Repinta los valores del overlay con los umbrales vigentes. */
 function renderSettingsValues() {
+  // Solo si existe Y está abierto (llamado también desde onThresholdsChanged,
+  // que corre en cada cambio aunque el overlay esté cerrado u oculto).
   if (!el.settingsOverlay || el.settingsOverlay.hidden) return;
   const set = (id, v, suf) => {
     const node = document.getElementById(id);
@@ -189,6 +191,9 @@ function renderSettingsValues() {
 }
 
 function toggleSettings(show = el.settingsOverlay.hidden) {
+  // Guard: sin overlay (markup no cargado o modo sin cuerpo) no hay nada que
+  // hacer; sin este check un click del ⚙ en un estado raro lanzaba TypeError.
+  if (!el.settingsOverlay || !el.btnSettings) return;
   el.settingsOverlay.hidden = !show;
   el.btnSettings.classList.toggle('icon-btn--active', show);
   if (show) renderSettingsValues();
@@ -866,8 +871,15 @@ window.api.onModeChanged?.((mode) => {
 
 // Cambios directos por IPC (tests, atajos) o desde el binario nativo: el
 // guardián del renderer sigue los umbrales vigentes sin recargar.
+// Campo a campo (no Object.assign): el payload puede venir parcial y un
+// `undefined` no debe pisar un umbral válido. Si el cambio lo originó este
+// renderer (adjustThreshold), re-aplicar los mismos valores es inofensivo.
 window.api.onThresholdsChanged?.((th) => {
-  if (th && typeof th === 'object') Object.assign(THRESHOLDS, th);
+  if (!th || typeof th !== 'object') return;
+  if (Number.isFinite(Number(th.cpu))) THRESHOLDS.cpu = Number(th.cpu);
+  if (Number.isFinite(Number(th.ram))) THRESHOLDS.ram = Number(th.ram);
+  if (Number.isFinite(Number(th.gpu))) THRESHOLDS.gpu = Number(th.gpu);
+  if (Number.isFinite(Number(th.temp))) THRESHOLDS.temp = Number(th.temp);
   renderSettingsValues();
 });
 

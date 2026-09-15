@@ -1,7 +1,7 @@
 //! main.rs — Proceso principal del widget en Tauri (Rust).
 //!
 //! Funcionalidad:
-//!  - Ventana frameless, always-on-top, 340×440 (mini 340×245).
+//!  - Ventana frameless, always-on-top, 340×500 (mini 340×245).
 //!  - Bandeja (Tray) + atajo global Ctrl+Shift+M para mostrar/ocultar.
 //!  - Instancia única (segundo lanzamiento enfoca la ventana existente).
 //!  - 7 comandos IPC consumidos por el renderer
@@ -170,8 +170,7 @@ fn set_widget_mode<R: Runtime>(
         let mut st = state.settings.lock().unwrap();
         st.mode = mode.clone();
         let _ = st.save();
-    }
-    let (w, h) = if mode == "mini" { (WIDGET_W, MINI_H) } else { (WIDGET_W, WIDGET_H) };
+    }        let (w, h) = if mode == "mini" { (WIDGET_W, MINI_H) } else { (WIDGET_W, WIDGET_H) };
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_size(LogicalSize::new(w, h));
     }

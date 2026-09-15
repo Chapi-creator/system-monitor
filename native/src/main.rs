@@ -34,10 +34,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, HOT_KEY_MODIFIERS, MOD_CONTROL,
     MOD_SHIFT, VK_M,
 };
-use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_INFO, NIF_MESSAGE, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIIF_WARNING,
-    NOTIFYICONDATAW, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_INFOTIP_FLAGS,
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_INFO, NIF_MESSAGE, NIF_ICON, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIIF_WARNING, NOTIFYICONDATAW, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_INFOTIP_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -271,7 +270,9 @@ unsafe fn tray_add(hwnd: HWND) {
     let mut nid = tray_data(hwnd);
     let icon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
     nid.hIcon = icon;
-    nid.uFlags |= NIF_MESSAGE;
+    // NIF_ICON + NIF_TIP: sin ellos Windows ignora hIcon y szTip → icono
+    // genérico en blanco y tooltip vacío (bug de presentación detectado).
+    nid.uFlags |= NIF_ICON | NIF_TIP;
     let tip = "System Monitor Widget — Ctrl+Shift+M";
     let chars: Vec<u16> = tip.encode_utf16().take(127).collect();
     nid.szTip[..chars.len()].copy_from_slice(&chars);
@@ -409,11 +410,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NCHITTEST => {
             // El header es zona de arrastre nativa (equivale a
             // data-tauri-drag-region): arrastrar el widget por su cabecera.
+            // Con el overlay de Ajustes abierto, la zona bajo la cabecera
+            // vuelve a ser HTCLIENT: los botones del overlay deben recibir
+            // el clic (HTCAPTION se los tragaba → overlay no clicable).
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             let mut pt = POINT { x: ((lparam.0) & 0xFFFF) as u16 as i16 as i32, y };
             let _ = ScreenToClient(hwnd, &mut pt);
             if let Some(app) = ptr.as_ref() {
-                if (pt.y as f32) < 36.0 * app.scale {
+                if (pt.y as f32) < 36.0 * app.scale && !app.ui.show_settings {
                     return LRESULT(HTCAPTION as isize);
                 }
             }

@@ -107,7 +107,7 @@ async function main() {
   check('top proceso con pid/name/cpu/mem', topProc?.pid > 0 && topProc?.name && typeof topProc?.cpu === 'number', `${topProc?.name} (${topProc?.pid}) cpu=${topProc?.cpu}`);
 
   console.log('\n=== 7. Comportamientos de ventana ===');
-  // 7a. setWidgetMode redimensiona (dev 340x440 → mini 340x245)
+  // 7a. setWidgetMode redimensiona (dev 340x500 → mini 340x245)
   await evalJs(`window.api.setWidgetMode('dev')`);
   await sleep(800);
   const hDev = await evalJs(`window.innerHeight`);

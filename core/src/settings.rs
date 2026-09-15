@@ -128,6 +128,12 @@ impl Settings {
     /// Guardado atómico: escribe a .tmp y renombra (un corte de luz no deja
     /// el JSON a medias). Silencia errores: preferencias no guardadas no
     /// deben tumbar la app (el próximo cambio reintenta).
+    ///
+    /// rename sobre destino existente falla en Windows (`AccessDenied`),
+    /// así que primero se elimina el archivo previo. El rename es la única
+    /// operación no atómica de la secuencia: si el proceso muere EXACTAMENTE
+    /// entre remove y rename, se pierde el settings (aceptable: el fallback
+    /// de load es defaults, nunca un archivo corrupto).
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(dir) = path.parent() {
@@ -136,6 +142,9 @@ impl Settings {
         let json = serde_json::to_string_pretty(self).unwrap_or_default();
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
         std::fs::rename(&tmp, &path)
     }
 }

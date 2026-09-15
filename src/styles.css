@@ -39,7 +39,10 @@ body {
 /* ---------- Contenedor del widget ---------- */
 .widget {
   width: 340px;
-  height: 440px;
+  /* Debe igualar el alto lógico de la ventana (WIDGET_H = 500): la ventana
+     mide 500 px pero el viewport útil es 1 px menos (frame); con 440 el
+     contenido sobraba 12 px y el fondo del widget se recortaba abajo. */
+  height: 500px;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -692,7 +695,9 @@ body {
 /* Cubre el cuerpo del widget en cualquier modo; la cabecera queda libre. */
 .settings-overlay {
   position: absolute;
-  inset: 36px 0 0 0; /* deja la cabecera (36 px) visible y arrastrable */
+  /* La cabecera real mide ~43 px (padding 10+10 + botón 22 + borde 1):
+     con 36 px el tapaba el borde inferior de la cabecera. */
+  inset: 44px 0 0 0;
   z-index: 40;
   display: flex;
   flex-direction: column;
