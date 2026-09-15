@@ -114,6 +114,17 @@
           </div>
         </article>
 
+        <article class="card">
+          <div class="card__row">
+            <span class="card__label">DISK</span>
+            <span class="card__value card__value--net">
+              <span class="net-arrow" title="Lectura">&#9660;</span><span id="disk-read">--</span>
+              <span class="net-sep">|</span>
+              <span class="net-arrow" title="Escritura">&#9650;</span><span id="disk-write">--</span>
+            </span>
+          </div>
+        </article>
+
       </div>
 
       <!-- MODO 4: Top Procesos (lista dedicada, sin recortes) -->
@@ -173,6 +184,27 @@
             <span class="card__value card__value--sm"><span id="c-net">--</span><small>KB/s</small></span>
           </div>
           <div class="chart-box"><canvas id="chart-net"></canvas></div>
+        </article>
+
+        <article class="card card--session">
+          <div class="card__row">
+            <span class="card__label">SESIÓN — MÁX / PROM</span>
+            <span class="card__value card__value--sm session-foot">--</span>
+          </div>
+          <div class="session-grid">
+            <span class="session-grid__metric">CPU</span>
+            <span class="session-grid__val session-cpu-max">--</span>
+            <span class="session-grid__val session-grid__val--avg session-cpu-avg">--</span>
+            <span class="session-grid__metric">RAM</span>
+            <span class="session-grid__val session-ram-max">--</span>
+            <span class="session-grid__val session-grid__val--avg session-ram-avg">--</span>
+            <span class="session-grid__metric">GPU</span>
+            <span class="session-grid__val session-gpu-max">--</span>
+            <span class="session-grid__val session-grid__val--avg session-gpu-avg">--</span>
+            <span class="session-grid__metric">RED</span>
+            <span class="session-grid__val session-net-max">--</span>
+            <span class="session-grid__val session-grid__val--avg session-net-avg">--</span>
+          </div>
         </article>
       </div>
     </section>

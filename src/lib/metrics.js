@@ -43,6 +43,40 @@
     return `${(bytes / 1024).toFixed(1)} KB/s`;
   }
 
+  /**
+   * Velocidad de disco legible: mismo formato dinámico que la red (KB/s →
+   * MB/s). Sentinel -1 (contadores aún no disponibles) → 'n/a'.
+   * @param {number} bytesSec
+   * @returns {string}
+   */
+  function formatDiskSpeed(bytesSec) {
+    const bytes = Number(bytesSec);
+    if (!Number.isFinite(bytes) || bytes < 0) return 'n/a';
+    return formatSpeed(bytes);
+  }
+
+  /**
+   * Acorta la ruta de un ejecutable para el tooltip del Top-5: conserva los
+   * 2 últimos segmentos con su separador original (…\Local\app.exe).
+   * Rutas cortas (≤ 2 separadores: unidad + 1 carpeta + exe) y vacías/null
+   * se devuelven tal cual o con el texto de reserva; el title nativo siempre
+   * muestra la ruta completa.
+   * @param {string|null|undefined} exe Ruta completa o null (SO la oculta).
+   * @returns {string}
+   */
+  function formatExePath(exe) {
+    const s = String(exe ?? '').trim();
+    if (!s) return 'ruta no disponible';
+    const norm = s.replace(/\\/g, '/');
+    const seps = norm.split('/').length - 1;
+    if (seps <= 2) return s; // Ruta corta: entra completa.
+    const slash = norm.lastIndexOf('/');
+    const prevSlash = norm.lastIndexOf('/', slash - 1);
+    // El reemplazo de separadores es 1:1: prevSlash apunta al mismo carácter
+    // en `s`, y desde ahí se conserva "\carpeta\exe" íntegro.
+    return '…' + s.slice(prevSlash);
+  }
+
   /** Adaptadores virtuales a omitir (Docker, Hyper-V/WSL, VMware, VPN-TAP, loopback...). */
   const VIRTUAL_IFACE_RE = /(docker|vethernet|vmware|virtualbox|loopback|wsl|hyper-v|tap|tun|bluetooth|hibernate|teredo)/i;
 
@@ -111,5 +145,5 @@
     return Math.max(0, Math.min(100, max));
   }
 
-  return { toNumber, round1, round2, formatSpeed, pickActiveIface, parseGpuCsvLine };
+  return { toNumber, round1, round2, formatSpeed, formatDiskSpeed, formatExePath, pickActiveIface, parseGpuCsvLine };
 });

@@ -16,7 +16,7 @@
 /* global Chart, SysMonMetrics */
 
 // Utilidades puras compartidas (módulo UMD cargado antes que este script).
-const { formatSpeed } = window.SysMonMetrics;
+const { formatSpeed, formatDiskSpeed, formatExePath } = window.SysMonMetrics;
 
 const METRICS_INTERVAL_MS = 2500;  // Especificación: 2.5 s por ciclo.
 const MAX_POINTS = 20;             // Límite estricto del historial de gráficas.
@@ -81,6 +81,9 @@ const el = {
   netIface: document.getElementById('net-iface'),
   netDown: document.getElementById('net-down'),
   netUp: document.getElementById('net-up'),
+  // Disco (solo modo Dev)
+  diskRead: document.getElementById('disk-read'),
+  diskWrite: document.getElementById('disk-write'),
   // Modo Procesos (lista dedicada a pantalla completa)
   tabProcs: document.getElementById('tab-procs'),
   processListFull: document.getElementById('process-list-full'),
@@ -431,6 +434,10 @@ function renderDevPanel(stats) {
   el.netIface.textContent = stats.network?.iface ?? '';
   el.netDown.textContent = formatSpeed(stats.network?.rxBytesSec);
   el.netUp.textContent = formatSpeed(stats.network?.txBytesSec);
+
+  // Disco: 'n/a' mientras el 1er renglón PDH llega (~2 s tras el arranque).
+  if (el.diskRead) el.diskRead.textContent = formatDiskSpeed(stats.disk?.readBytesSec);
+  if (el.diskWrite) el.diskWrite.textContent = formatDiskSpeed(stats.disk?.writeBytesSec);
 }
 
 /** Tiras del mini overlay (solo con modo 'mini' activo). */
@@ -503,10 +510,12 @@ function buildProcessRow(container) {
 function updateProcessRow(row, p) {
   row.setPid(p.pid);
   row.name.textContent = p.name || `PID ${p.pid}`;
-  row.name.title = `${p.name} (PID ${p.pid})`;
   row.pid.textContent = `#${p.pid}`;
   row.cpu.textContent = `${fmt1(p.cpu)}%`;
   row.li.hidden = false;
+  // Tooltip nativo (DOM puro, sin innerHTML: la ruta/nunca puede inyectar
+  // markup): nombre, PID, ruta del exe y consumo de la fila.
+  row.li.title = buildProcessTooltip(p);
 }
 
 const procRows = [];
@@ -591,6 +600,48 @@ async function fetchGpuInfo() {
 }
 
 // ---------------------------------------------------------------------------
+// Tooltip del Top-5: título con nombre/PID/ruta/CPU/RAM de cada proceso.
+// ---------------------------------------------------------------------------
+function buildProcessTooltip(p) {
+  const exe = p.exe ? formatExePath(p.exe) : 'ruta no disponible';
+  return [
+    p.name || `PID ${p.pid}`,
+    `PID: ${p.pid}`,
+    exe,
+    `CPU: ${fmt1(p.cpu)}%  ·  RAM: ${fmt1(p.mem)}%`,
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Estadísticas de sesión (máx/prom desde el arranque): se consultan solo al
+// abrir el modo Gráficas y cada tick siguiente; el cálculo vive en Rust.
+// ---------------------------------------------------------------------------
+let sessionStats = null;
+
+async function fetchSessionStats() {
+  try {
+    const res = await window.api.getSessionStats();
+    if (!res?.ok) return;
+    sessionStats = res;
+    const q = (sel) => document.querySelector(sel);
+    const set = (sel, v, suffix) => {
+      const node = q(sel);
+      if (node) node.textContent = v == null ? '--' : `${v}${suffix ?? ''}`;
+    };
+    set('.session-cpu-max', res.cpu?.max, '%');
+    set('.session-cpu-avg', res.cpu?.avg, '%');
+    set('.session-ram-max', res.mem?.max, '%');
+    set('.session-ram-avg', res.mem?.avg, '%');
+    set('.session-gpu-max', res.gpu?.max, '%');
+    set('.session-gpu-avg', res.gpu?.avg, '%');
+    set('.session-net-max', res.net?.max != null ? formatSpeed(res.net.max) : null);
+    set('.session-net-avg', res.net?.avg != null ? formatSpeed(res.net.avg) : null);
+    const foot = q('.session-foot');
+    if (foot) foot.textContent = `desde el arranque · ${res.samples} muestras`;
+  } catch { /* la tarjeta muestra '--' */ }
+}
+
+// ---------------------------------------------------------------------------
 // Loop de muestreo: UN solo intervalo de 2500 ms, trabajo filtrado por modo
 // ---------------------------------------------------------------------------
 let metricsTimer = null;
@@ -625,7 +676,10 @@ async function pollTick() {
     // Renderizado condicional estricto por modo.
     if (activeMode === 'dev') renderDevPanel(stats);
     else if (activeMode === 'mini') renderMini(stats);
-    else if (activeMode === 'charts') updateCharts(stats);
+    else if (activeMode === 'charts') {
+      updateCharts(stats);
+      fetchSessionStats(); // máx/prom desde el arranque (barato: ya calculado)
+    }
     // En modo 'procs' las tarjetas no existen: solo la lista de abajo.
 
     // La lista de procesos SOLO se consulta en modo Dev o Procesos.

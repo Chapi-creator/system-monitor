@@ -14,7 +14,7 @@
 
 mod sampler;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,15 @@ pub struct NetworkInfo {
     pub tx_bytes_sec: f64,
 }
 
+/// E/S de disco físico agregada (B/s). Sentinel -1 = contadores aún no
+/// disponibles (el 1er renglón PDH llega ~2 s tras el arranque).
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskInfo {
+    pub read_bytes_sec: f64,
+    pub write_bytes_sec: f64,
+}
+
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -56,6 +65,7 @@ pub struct Snapshot {
     pub cpu: f64,
     pub memory: MemoryInfo,
     pub network: NetworkInfo,
+    pub disk: DiskInfo,
     pub cpu_temp: f64,
     pub temp_status: String,
     pub gpu: f64,
@@ -69,6 +79,9 @@ pub struct ProcInfo {
     pub name: String,
     pub cpu: f64,
     pub mem: f64,
+    /// Ruta completa del ejecutable (None si el SO la oculta): alimenta el
+    /// tooltip de la fila del Top-5. La resuelve sysinfo con `with_exe`.
+    pub exe: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -84,6 +97,66 @@ pub struct GpuInfo {
 pub struct TempState {
     pub celsius: f64,
     pub status: String,
+}
+
+/// Estadísticas de sesión en memoria: máximos y promedios desde el arranque
+/// de la app. Viven en Rust (sobreviven a recargas del webview) y se calculan
+/// con las muestras que spawn_stats YA toma cada segundo: costo extra ≈ 0.
+/// Los campos `_sum` y `gpu_samples` se saltan en la serialización: solo
+/// alimentan los promedios que ve el renderer.
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStats {
+    pub samples: u64,
+    #[serde(skip)]
+    pub cpu_sum: f64,
+    #[serde(skip)]
+    pub mem_sum: f64,
+    #[serde(skip)]
+    pub gpu_sum: f64,
+    #[serde(skip)]
+    pub net_sum: f64,
+    #[serde(skip)]
+    pub gpu_samples: u64,
+    pub cpu_max: f64,
+    pub mem_max: f64,
+    pub gpu_max: f64,
+    pub net_max: f64,
+}
+
+impl SessionStats {
+    /// Registra una muestra. `gpu < 0` = sin dato (typeperf aún calibrando):
+    /// se ignora para GPU pero NO invalida el resto de la muestra.
+    pub fn record(&mut self, cpu: f64, mem: f64, gpu: f64, net_bps: f64) {
+        self.samples += 1;
+        self.cpu_sum += cpu;
+        self.mem_sum += mem;
+        self.net_sum += net_bps;
+        self.cpu_max = self.cpu_max.max(cpu);
+        self.mem_max = self.mem_max.max(mem);
+        self.net_max = self.net_max.max(net_bps);
+        if gpu >= 0.0 {
+            self.gpu_sum += gpu;
+            self.gpu_samples += 1;
+            self.gpu_max = self.gpu_max.max(gpu);
+        }
+    }
+
+    pub fn cpu_avg(&self) -> f64 {
+        if self.samples == 0 { 0.0 } else { self.cpu_sum / self.samples as f64 }
+    }
+
+    pub fn mem_avg(&self) -> f64 {
+        if self.samples == 0 { 0.0 } else { self.mem_sum / self.samples as f64 }
+    }
+
+    pub fn gpu_avg(&self) -> f64 {
+        if self.gpu_samples == 0 { 0.0 } else { self.gpu_sum / self.gpu_samples as f64 }
+    }
+
+    pub fn net_avg(&self) -> f64 {
+        if self.samples == 0 { 0.0 } else { self.net_sum / self.samples as f64 }
+    }
 }
 
 pub struct GpuInfoCache {
@@ -103,6 +176,11 @@ pub struct AppState {
     pub mode: Mutex<String>,
     /// Ventana visible: los hilos de muestreo caros se gatean con esto.
     pub visible: AtomicBool,
+    /// E/S de disco agregada en B/s (i64 evita f64 atómico): -1 = sin dato.
+    pub disk_read: AtomicI64,
+    pub disk_write: AtomicI64,
+    /// Máximos/promedios desde el arranque (fuente de verdad: Rust).
+    pub session: Mutex<SessionStats>,
 }
 
 impl Default for AppState {
@@ -112,6 +190,7 @@ impl Default for AppState {
                 ok: true,
                 temp_status: "none".into(),
                 gpu: -1.0,
+                disk: DiskInfo { read_bytes_sec: -1.0, write_bytes_sec: -1.0 },
                 ..Default::default()
             }),
             procs: Mutex::new(Vec::new()),
@@ -124,6 +203,9 @@ impl Default for AppState {
             pinned: AtomicBool::new(true),
             mode: Mutex::new("dev".into()),
             visible: AtomicBool::new(true),
+            disk_read: AtomicI64::new(-1),
+            disk_write: AtomicI64::new(-1),
+            session: Mutex::new(SessionStats::default()),
         }
     }
 }
@@ -188,6 +270,22 @@ fn get_system_stats(state: State<'_, Arc<AppState>>) -> Value {
 #[tauri::command]
 fn get_top_processes(state: State<'_, Arc<AppState>>) -> Value {
     json!({ "ok": true, "processes": *state.procs.lock().unwrap() })
+}
+
+/// Estadísticas de sesión (máximos y promedios desde el arranque). Cero IPC
+/// extra en el camino caliente: el renderer las consulta solo al abrir el
+/// modo Gráficas y después cada 2.5 s junto con el resto del snapshot.
+#[tauri::command]
+fn get_session_stats(state: State<'_, Arc<AppState>>) -> Value {
+    let s = state.session.lock().unwrap();
+    json!({
+        "ok": true,
+        "samples": s.samples,
+        "cpu": { "max": round1(s.cpu_max), "avg": round1(s.cpu_avg()) },
+        "mem": { "max": round1(s.mem_max), "avg": round1(s.mem_avg()) },
+        "gpu": { "max": round1(s.gpu_max), "avg": round1(s.gpu_avg()) },
+        "net": { "max": round1(s.net_max), "avg": round1(s.net_avg()) }
+    })
 }
 
 const GPU_INFO_TTL: Duration = Duration::from_secs(10 * 60);
@@ -384,6 +482,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_system_stats,
             get_top_processes,
+            get_session_stats,
             get_gpu_info,
             kill_process,
             toggle_always_on_top,
@@ -685,6 +784,73 @@ mod window_state_tests {
         );
         assert!(state.visible.load(Ordering::SeqCst));
         app.cleanup_before_exit();
+    }
+
+    // ------------------- Ronda de datos: sesión + disco + exe -------------------
+
+    #[test]
+    fn get_session_stats_refleja_maximos_y_promedios_grabados() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        {
+            let mut s = state.session.lock().unwrap();
+            s.record(10.0, 40.0, 5.0, 1024.0);
+            s.record(30.0, 60.0, -1.0, 2048.0); // GPU sin dato: no entra al promedio.
+            s.record(20.0, 50.0, 25.0, 512.0);
+        }
+
+        let res = get_session_stats(app.state::<Arc<AppState>>());
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(res["samples"], json!(3));
+        assert_eq!(res["cpu"]["max"], json!(30.0));
+        assert_eq!(res["cpu"]["avg"], json!(20.0));
+        assert_eq!(res["mem"]["max"], json!(60.0));
+        assert_eq!(res["gpu"]["max"], json!(25.0));
+        assert_eq!(res["gpu"]["avg"], json!(15.0)); // (5+25)/2, sin la muestra -1.
+        assert_eq!(res["net"]["max"], json!(2048.0));
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn snapshot_inicial_y_session_stats_arrancan_en_neutro_honesto() {
+        let app = test_app_with_window();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+
+        // Disco sin dato aún → sentinel -1 (la UI muestra 'n/a', nunca 0 falso).
+        let snap = get_system_stats(app.state::<Arc<AppState>>());
+        assert_eq!(snap["disk"]["readBytesSec"], json!(-1.0));
+        assert_eq!(snap["disk"]["writeBytesSec"], json!(-1.0));
+
+        // Sesión sin muestras → promedios 0 y samples 0 (sin división por cero).
+        let res = get_session_stats(app.state::<Arc<AppState>>());
+        assert_eq!(res["samples"], json!(0));
+        assert_eq!(res["cpu"]["avg"], json!(0.0));
+        assert_eq!(res["gpu"]["max"], json!(0.0));
+        app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn proc_info_serializa_exe_y_toleran_null() {
+        // Con ruta: el campo "exe" llega al renderer para el tooltip.
+        let con_ruta = ProcInfo {
+            pid: 42,
+            name: "app.exe".into(),
+            cpu: 1.5,
+            mem: 2.25,
+            exe: Some("C:\\Breiner\\app.exe".into()),
+        };
+        let v = serde_json::to_value(&con_ruta).unwrap();
+        assert_eq!(v["exe"], json!("C:\\Breiner\\app.exe"));
+        assert_eq!(v["pid"], json!(42));
+
+        // Sin ruta (SO protegido): null explícito — el renderer degrada a
+        // 'ruta no disponible' sin romperse.
+        let sin_ruta = ProcInfo { exe: None, ..con_ruta };
+        let v = serde_json::to_value(&sin_ruta).unwrap();
+        assert!(v["exe"].is_null());
     }
 }
 

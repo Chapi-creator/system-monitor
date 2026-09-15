@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { formatSpeed, pickActiveIface, parseGpuCsvLine } = require('../src/lib/metrics');
+const { formatSpeed, formatDiskSpeed, formatExePath, pickActiveIface, parseGpuCsvLine } = require('../src/lib/metrics');
 
 // ---------------------------------------------------------------------------
 // formatSpeed
@@ -102,4 +102,42 @@ test('parseGpuCsvLine: ignora valores no positivos', () => {
   const line = '"ts","0","-5","9"';
   const types = ['3d', 'copy', 'video'];
   assert.equal(parseGpuCsvLine(line, types), 9);
+});
+
+// ---------------------------------------------------------------------------
+// formatDiskSpeed (ronda de datos)
+// ---------------------------------------------------------------------------
+test('formatDiskSpeed: mismo formato dinámico que la red', () => {
+  assert.equal(formatDiskSpeed(512 * 1024), '512.0 KB/s');
+  assert.equal(formatDiskSpeed(2 * 1024 * 1024), '2.00 MB/s');
+  assert.equal(formatDiskSpeed(0), '0.0 KB/s');
+});
+
+test('formatDiskSpeed: sentinel -1 y no-numéricos → "n/a"', () => {
+  assert.equal(formatDiskSpeed(-1), 'n/a');
+  assert.equal(formatDiskSpeed(undefined), 'n/a');
+  assert.equal(formatDiskSpeed(Number.NaN), 'n/a');
+  assert.equal(formatDiskSpeed(-50), 'n/a');
+});
+
+// ---------------------------------------------------------------------------
+// formatExePath (tooltip del Top-5)
+// ---------------------------------------------------------------------------
+test('formatExePath: conserva los 2 últimos segmentos de rutas largas', () => {
+  assert.equal(
+    formatExePath('C:\\Users\\Breiner\\AppData\\Local\\app.exe'),
+    '…\\Local\\app.exe'
+  );
+  assert.equal(formatExePath('/usr/local/bin/node'), '…/bin/node');
+});
+
+test('formatExePath: rutas cortas entran completas', () => {
+  assert.equal(formatExePath('C:\\app.exe'), 'C:\\app.exe');
+  assert.equal(formatExePath('C:\\tools\\app.exe'), 'C:\\tools\\app.exe');
+});
+
+test('formatExePath: vacío/null → texto de reserva', () => {
+  assert.equal(formatExePath(''), 'ruta no disponible');
+  assert.equal(formatExePath(null), 'ruta no disponible');
+  assert.equal(formatExePath(undefined), 'ruta no disponible');
 });

@@ -363,6 +363,29 @@ body {
   display: none;
 }
 
+/* Tooltip nativo de las filas del Top-5: muestra nombre, PID, ruta del exe
+   y consumo CPU/RAM. Se construye en DOM (renderer.js): sin innerHTML para
+   que ningún nombre/ruta de proceso pueda inyectar markup. */
+.process-item__tip-name {
+  font-weight: bold;
+  color: #00ffe5;
+}
+
+.process-item__tip-line {
+  color: var(--text-dim);
+}
+
+.process-item__tip-path {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-item__tip-value {
+  color: var(--text);
+}
+
 .process-item:hover {
   border-color: rgba(0, 255, 229, 0.3);
   background: rgba(0, 255, 229, 0.05);
@@ -429,6 +452,39 @@ body {
 .tab[hidden] {
   display: none;
 }
+
+/* ---------- Modo 3: Gráficas ---------- */
+/* Tarjeta de sesión (máx/prom desde el arranque): grid compacta 3 columnas
+   (métrica · máx · prom), reutilizando los colores de cada métrica. */
+.card--session {
+  padding-bottom: 10px;
+}
+
+.session-grid {
+  display: grid;
+  grid-template-columns: 40px 1fr 1fr;
+  gap: 3px 8px;
+  margin-top: 6px;
+  font-size: 10px;
+}
+
+.session-grid__metric {
+  color: var(--text-dim);
+}
+
+.session-grid__val {
+  text-align: right;
+  color: var(--text);
+}
+
+.session-grid__val--avg {
+  color: var(--text-dim);
+}
+
+.session-cpu-max { color: #00ffe5; }
+.session-ram-max { color: #ff2bd6; }
+.session-gpu-max { color: #9d6bff; }
+.session-net-max { color: #ffb020; }
 
 /* ---------- Modo 1: Mini-Overlay ---------- */
 .mode {

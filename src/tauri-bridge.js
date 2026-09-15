@@ -24,10 +24,12 @@
     typeof value === 'string' && ['dev', 'mini', 'charts', 'procs'].includes(value) ? value : null;
 
   window.api = {
-    /** CPU %, RAM (% y GB), red (B/s) y temperatura °C. */
+    /** CPU %, RAM (% y GB), red (B/s), disco (B/s) y temperatura °C. */
     getSystemStats: () => invoke('get_system_stats'),
-    /** Top 5 procesos por CPU → [{ pid, name, cpu, mem }] */
+    /** Top 5 procesos por CPU → [{ pid, name, cpu, mem, exe? }] */
     getTopProcesses: () => invoke('get_top_processes'),
+    /** Máximos y promedios desde el arranque (calculados en Rust). */
+    getSessionStats: () => invoke('get_session_stats'),
     /** Termina un proceso por PID. */
     killProcess: (pid) => invoke('kill_process', { pid: toPid(pid) }),
     /** Fija / desfija el widget sobre las demás ventanas. → { ok, pinned } */
