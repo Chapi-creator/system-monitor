@@ -96,11 +96,13 @@ const el = {
   cRam: document.getElementById('c-ram'),
   cGpu: document.getElementById('c-gpu'),
   cNet: document.getElementById('c-net'),
+  cDisk: document.getElementById('c-disk'),
   chartCpu: document.getElementById('chart-cpu'),
   chartTemp: document.getElementById('chart-temp'),
   chartRam: document.getElementById('chart-ram'),
   chartGpu: document.getElementById('chart-gpu'),
   chartNet: document.getElementById('chart-net'),
+  chartDisk: document.getElementById('chart-disk'),
   widget: document.getElementById('widget'),
 };
 
@@ -175,7 +177,7 @@ async function setMode(mode, fromBackend = false) {
 // Chart.js: configuración de extrema optimización
 // ---------------------------------------------------------------------------
 /** Historial con tope estricto de 20 muestras por serie (null = sin dato). */
-const history = { cpu: [], temp: [], ram: [], gpu: [], net: [] };
+const history = { cpu: [], temp: [], ram: [], gpu: [], net: [], diskRead: [], diskWrite: [] };
 
 /** Techo de la escala Y del chart GPU: nunca por debajo de 10%. */
 const GPU_Y_FLOOR = 10;
@@ -185,7 +187,7 @@ function pushCapped(arr, value) {
   if (arr.length > MAX_POINTS) arr.shift(); // shift() al superar los 20 puntos.
 }
 
-const charts = { cpu: null, temp: null, ram: null, gpu: null, net: null };
+const charts = { cpu: null, temp: null, ram: null, gpu: null, net: null, disk: null };
 
 /** Base común: cero animaciones, cero puntos, cero tooltips, cero leyenda. */
 function baseDataset(label, color, fill) {
@@ -247,9 +249,21 @@ function ensureCharts() {
   charts.gpu = makeChart(el.chartGpu, 'GPU', '#9d6bff', 'rgba(157,107,255,0.12)', 100);
   // Red: escala Y dinámica (suggestedMax = pico reciente, mínimo 64 KiB/s).
   charts.net = makeChart(el.chartNet, 'NET', '#ffb020', 'rgba(255,176,32,0.12)', 64);
-  for (const key of Object.keys(history)) {
-    charts[key].data.datasets[0].data = history[key]; // Referencia viva al historial.
-  }
+  // Disco: dos series (lectura/escritura) en KiB/s, escala Y dinámica igual que NET.
+  charts.disk = makeChart(el.chartDisk, 'DISCO', '#00ff88', 'rgba(0,255,136,0.12)', 64);
+  charts.disk.data.datasets.push({
+    ...baseDataset('ESCRITURA', '#00c8ff', 'rgba(0,200,255,0.10)'),
+    data: history.diskWrite,
+  });
+
+  // Referencias vivas al historial (mapa explícito: el disco son DOS series y
+  // un bucle por claves de `history` lanzaría TypeError en diskRead/diskWrite).
+  charts.cpu.data.datasets[0].data = history.cpu;
+  charts.temp.data.datasets[0].data = history.temp;
+  charts.ram.data.datasets[0].data = history.ram;
+  charts.gpu.data.datasets[0].data = history.gpu;
+  charts.net.data.datasets[0].data = history.net;
+  charts.disk.data.datasets[0].data = history.diskRead;
 }
 
 function updateCharts(stats) {
@@ -266,6 +280,16 @@ function updateCharts(stats) {
     const peak = Math.max(...history.gpu.filter((v) => v !== null), GPU_Y_FLOOR);
     gpuChart.options.scales.y.suggestedMax = Math.ceil(peak * 1.2);
   }
+  // Disco: escala Y al pico reciente de lectura/escritura (mínimo 64 KiB/s).
+  const diskChart = charts.disk;
+  if (diskChart) {
+    const peak = Math.max(
+      ...history.diskRead.filter((v) => v !== null),
+      ...history.diskWrite.filter((v) => v !== null),
+      64
+    );
+    diskChart.options.scales.y.suggestedMax = peak;
+  }
 
   // update('none'): sin animación, sin re-layout extra.
   for (const key of Object.keys(charts)) charts[key]?.update('none');
@@ -275,6 +299,10 @@ function updateCharts(stats) {
   el.cRam.textContent = fmt1(clampPct(stats.memory?.percent));
   el.cGpu.textContent = formatGpu(stats.gpu);
   el.cNet.textContent = netKib.toFixed(1);
+  const diskRead = Number(stats.disk?.readBytesSec);
+  const diskWrite = Number(stats.disk?.writeBytesSec);
+  el.cDisk.textContent =
+    `${formatDiskSpeed(diskRead)} / ${formatDiskSpeed(diskWrite)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +690,11 @@ async function pollTick() {
     pushCapped(history.ram, clampPct(stats.memory?.percent));
     pushCapped(history.gpu, gpuOf(stats.gpu));
     pushCapped(history.net, netKib);
+    // Disco en KiB/s (sentinel -1 → null: hueco honesto, no cero falso).
+    const diskReadKib = Number(stats.disk?.readBytesSec);
+    const diskWriteKib = Number(stats.disk?.writeBytesSec);
+    pushCapped(history.diskRead, diskReadKib >= 0 ? diskReadKib / 1024 : null);
+    pushCapped(history.diskWrite, diskWriteKib >= 0 ? diskWriteKib / 1024 : null);
 
     // El guardián siempre vigila, esté el modo que esté.
     runGuardian(stats);

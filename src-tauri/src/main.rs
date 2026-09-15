@@ -29,7 +29,7 @@ use tauri_plugin_global_shortcut::ShortcutState;
 // Estado compartido entre los hilos de muestreo y los comandos IPC.
 // ---------------------------------------------------------------------------
 const WIDGET_W: f64 = 340.0;
-const WIDGET_H: f64 = 440.0;
+const WIDGET_H: f64 = 500.0;
 const MINI_H: f64 = 245.0;
 
 /// Snapshot de métricas (camelCase) para el renderer.

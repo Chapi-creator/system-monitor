@@ -61,7 +61,7 @@ async function main() {
   const gpuDetail = await evalJs(`document.getElementById('gpu-detail')?.textContent.trim()`);
   check('detalle GPU (modelo · VRAM)', /Intel|NVIDIA|AMD|Radeon|GeForce/i.test(gpuDetail || ''), gpuDetail);
 
-  console.log('\n=== 4. Modo Gráficas: Chart.js + 5 canvas ===');
+  console.log('\n=== 4. Modo Gráficas: Chart.js + 6 canvas ===');
   await evalJs(`window.api.setWidgetMode('charts')`);
   await sleep(1500);
   const charts = await evalJs(`(() => {
@@ -70,13 +70,20 @@ async function main() {
     return { total: canvases.length, sized, chartJs: typeof window.Chart === 'function', visible: [...document.querySelectorAll('.mode')].find(m => !m.hidden)?.id };
   })()`);
   check('Chart.js cargado', charts?.chartJs === true);
-  check('5 canvas con tamaño real', charts?.sized === 5, `${charts?.sized}/5`);
+  check('6 canvas con tamaño real', charts?.sized === 6, `${charts?.sized}/6`);
   const chartValues = await evalJs(`(() => {
     const charts = window.Chart.getChart ? window.Chart.getChart(document.getElementById('chart-cpu')) : null;
     const ds = charts?.data?.datasets?.[0]?.data || [];
     return { n: ds.length, hasValue: ds.some(v => typeof v === 'number' && v > 0) };
   })()`);
   check('serie CPU con datos', chartValues?.hasValue === true, `${chartValues?.n} puntos`);
+  const diskChartProbe = await evalJs(`(() => {
+    const c = window.Chart.getChart ? window.Chart.getChart(document.getElementById('chart-disk')) : null;
+    const rd = c?.data?.datasets?.[0]?.data || [];
+    const wr = c?.data?.datasets?.[1]?.data || [];
+    return { hasRead: rd.some(v => typeof v === 'number' && v >= 0), hasWrite: wr.some(v => typeof v === 'number' && v >= 0), n: rd.length };
+  })()`);
+  check('gráfica DISCO: 2 series con datos', diskChartProbe?.hasRead === true && diskChartProbe?.hasWrite === true, `${diskChartProbe?.n} puntos`);
 
   console.log('\n=== 5. Modo Mini: 4 strips + red ===');
   await evalJs(`window.api.setWidgetMode('mini')`);

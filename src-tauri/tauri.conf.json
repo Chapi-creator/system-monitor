@@ -12,7 +12,7 @@
         "label": "main",
         "title": "System Monitor Widget",
         "width": 340,
-        "height": 440,
+        "height": 500,
         "minWidth": 340,
         "minHeight": 245,
         "resizable": false,

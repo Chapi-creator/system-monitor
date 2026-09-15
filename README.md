@@ -8,12 +8,13 @@ Floating minimalist desktop widget for real-time system monitoring in the corner
 
 - **4 display modes**: Mini-Overlay (compact), Dev & Diagnostics, real-time charts, Top 5 processes.
 - **Accurate metrics**: CPU via kernel tick deltas, real RAM usage (`total − available`), per-interface virtual-adapter filtering, ACPI CPU temperature, GPU usage and **physical disk I/O (read/write B/s)** from Windows perf counters (PDH/`typeperf`) — same source as Task Manager. Disk counter names are resolved through the Perflib registry tables, so the widget works on non-English Windows too.
+- **6 real-time charts** (charts mode): CPU, temp, RAM, GPU, network and a **disk I/O chart** with read (green) + write (blue) series, both with dynamic auto-scaling Y like the NET chart.
 - **Session stats card** (charts mode): max & average of CPU/RAM/GPU/NET since launch, computed in Rust from the samples it already takes — no extra polling, no disk writes.
 - **Process tooltips**: hovering a Top-5 row shows the PID, the full executable path (resolved once via sysinfo) and its CPU/RAM usage.
 - **Proactive guardian**: native Windows notifications when CPU ≥ 85%, RAM ≥ 90%, GPU ≥ 90% or CPU temp ≥ 80 °C sustained across reads (anti-flood, per-type cooldown).
 - **Kill processes** from the Top 5 list with validation in Rust (never the widget itself, never system-critical PIDs).
 - **Tray + global shortcut** `Ctrl+Shift+M` to show/hide, always-on-top toggle, single-instance lock.
-- **Low footprint**: 2.5 s sampling, TTL + single-flight caching for expensive WMI queries, persistent GPU sampler (one `typeperf` child, no per-cycle process spawns). While hidden, samplers gate by visibility and `typeperf` is suspended via `NtSuspendProcess` — and a Job Object guarantees no orphaned `typeperf.exe` ever outlives the app.
+- **Low footprint**: 2.5 s sampling, TTL + single-flight caching for expensive WMI queries, persistent GPU/disk samplers (one `typeperf` child each, no per-cycle process spawns). While hidden, samplers gate by visibility and `typeperf` is suspended via `NtSuspendProcess` — and a Job Object guarantees no orphaned `typeperf.exe` ever outlives the app. Measured overhead of the data round (disk chart + tooltips + session stats): **+0.05 pp CPU visible, ~0 hidden**.
 
 ## Requirements
 
@@ -42,7 +43,7 @@ The suite has two layers:
 | Command | What it runs | Needs the app live? |
 |---|---|---|
 | `npm test` | **28 unit tests** (`test/*.test.js`): cache TTL + single-flight, metrics formatting (network/disk speed, exe-path shortening), PID validation, event listeners | No |
-| `npm run test:e2e` | **39-check E2E suite** (`tauri-full-test.js`) over CDP: real UI rendering of the 4 modes, charts with data, process list, kill-process contract, hide-to-tray (OS-level visibility via `IsWindowVisible`), single instance | **Yes** |
+| `npm run test:e2e` | **40-check E2E suite** (`tauri-full-test.js`) over CDP: real UI rendering of the 4 modes, charts with data (incl. disk read/write series), process list, kill-process contract, hide-to-tray (OS-level visibility via `IsWindowVisible`), single instance | **Yes** |
 | `cargo test` (in `src-tauri/`) | **26 Rust tests**: `mode-changed` event emission, hide/show state transitions and kill guards with `MockRuntime`, GPU CSV parsing, localized disk-counter resolution, session-stats accumulation, virtual-adapter filter | No |
 | `node probe-data-round.js` | **17-check live probe** of the data round: DISK row rendering, process tooltips, session stats card | **Yes** |
 | `node e2e-mode-event.js` | Focused E2E for live `onModeChanged` delivery: IPC path, UI path without event echo, `unlisten` | **Yes** |

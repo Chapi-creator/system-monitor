@@ -441,6 +441,22 @@ body {
 }
 
 /* ---------- Pestañas ---------- */
+#tab-charts {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyan-dim) transparent;
+}
+
+#tab-charts::-webkit-scrollbar {
+  width: 4px;
+}
+
+#tab-charts::-webkit-scrollbar-thumb {
+  background: var(--cyan-dim);
+  border-radius: 2px;
+}
+
 .tab {
   flex: 1;
   display: flex;
