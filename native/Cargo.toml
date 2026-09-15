@@ -1,0 +1,38 @@
+[package]
+name = "sysmon-native"
+version = "1.0.0"
+description = "Widget de monitoreo del sistema con UI 100% nativa Win32+Direct2D (sin WebView)"
+authors = ["Breiner"]
+license = "MIT"
+edition = "2021"
+
+[[bin]]
+name = "sysmon-native"
+path = "src/main.rs"
+
+[dependencies]
+sysmon-core = { path = "../core" }
+sysinfo = "0.33"
+wmi = "0.17"
+is_elevated = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# Crate `windows` (bindings COM completos): Direct2D/DirectWrite/DXGI para la
+# UI y Shell para la bandeja. Ya está en el árbol de dependencias de Tauri.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-numerics = "0.2"

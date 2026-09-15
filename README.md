@@ -1,6 +1,9 @@
 # System Monitor Widget
 
-Floating minimalist desktop widget for real-time system monitoring in the corner of your screen: **CPU, RAM, Network, CPU temperature and GPU usage**. Built with **Tauri v2** (Rust backend + WebView2).
+Floating minimalist desktop widget for real-time system monitoring in the corner of your screen: **CPU, RAM, Network, CPU temperature and GPU usage**. Two variants share the same core:
+
+- **Tauri v2** (Rust backend + WebView2 UI) — the original, feature-complete variant.
+- **Nativo** (`native/`, Win32 + Direct2D, **sin WebView**) — un solo proceso, misma lógica y diseño, ~60 MB de árbol vs ~350-400 MB del WebView. El muestreo, el estado y los formateadores viven en el crate compartido `core/` (sysmon-core): cero lógica duplicada entre ambas variantes.
 
 ![License](https://img.shields.io/npm/l/system-monitor-widget)
 
@@ -25,8 +28,13 @@ Floating minimalist desktop widget for real-time system monitoring in the corner
 
 ```bash
 npm install
-npm run tauri:dev
+npm run tauri:dev       # variante Tauri (WebView2)
+cargo run -p sysmon-native --release   # variante nativa (sin WebView)
 ```
+
+### Variante nativa: qué portó y qué falta
+
+La variante nativa (`native/`) replica: ventana frameless always-on-top con arrastre por el header, los 4 modos (mini/dev/charts/procs), las 6 gráficas con huecos honestos y auto-escala, Top-5 procesos con kill (confirmación + taskkill /F /T), tooltip por proceso, stats de sesión, bandeja con menú y globos de alerta, hotkey Ctrl+Shift+M y el mismo guardián proactivo (streaks + latch + cooldown). El DPI-awareness es per-monitor. Medido en vivo: **1 proceso, ~60 MB de árbol (host 42 MB + 2 typeperf), 0.31% CPU, exe de 0.7 MB**.
 
 ## Build & distribution
 

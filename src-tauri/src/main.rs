@@ -12,13 +12,16 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod sampler;
+// El núcleo compartido (tipos, estado, sampler y formateadores) vive en el
+// crate sysmon-core: lo usan este binario (vía IPC al WebView) y el binario
+// nativo (native/) sin duplicar una sola línea.
+use sysmon_core::{round1, AppState, MINI_H, WIDGET_H, WIDGET_W};
+use sysmon_core::sampler;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -26,208 +29,8 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, Runtime, State, WindowEven
 use tauri_plugin_global_shortcut::ShortcutState;
 
 // ---------------------------------------------------------------------------
-// Estado compartido entre los hilos de muestreo y los comandos IPC.
-// ---------------------------------------------------------------------------
-const WIDGET_W: f64 = 340.0;
-const WIDGET_H: f64 = 500.0;
-const MINI_H: f64 = 245.0;
-
-/// Snapshot de métricas (camelCase) para el renderer.
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryInfo {
-    pub percent: f64,
-    pub used_gb: f64,
-    pub total_gb: f64,
-}
-
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkInfo {
-    pub iface: String,
-    pub rx_bytes_sec: f64,
-    pub tx_bytes_sec: f64,
-}
-
-/// E/S de disco físico agregada (B/s). Sentinel -1 = contadores aún no
-/// disponibles (el 1er renglón PDH llega ~2 s tras el arranque).
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct DiskInfo {
-    pub read_bytes_sec: f64,
-    pub write_bytes_sec: f64,
-}
-
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct Snapshot {
-    pub ok: bool,
-    pub cpu: f64,
-    pub memory: MemoryInfo,
-    pub network: NetworkInfo,
-    pub disk: DiskInfo,
-    pub cpu_temp: f64,
-    pub temp_status: String,
-    pub gpu: f64,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcInfo {
-    pub pid: u32,
-    pub name: String,
-    pub cpu: f64,
-    pub mem: f64,
-    /// Ruta completa del ejecutable (None si el SO la oculta): alimenta el
-    /// tooltip de la fila del Top-5. La resuelve sysinfo con `with_exe`.
-    pub exe: Option<String>,
-}
-
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct GpuInfo {
-    pub ok: bool,
-    pub model: String,
-    pub vendor: String,
-    pub vram_mb: Option<u64>,
-    pub driver: String,
-}
-
-pub struct TempState {
-    pub celsius: f64,
-    pub status: String,
-}
-
-/// Estadísticas de sesión en memoria: máximos y promedios desde el arranque
-/// de la app. Viven en Rust (sobreviven a recargas del webview) y se calculan
-/// con las muestras que spawn_stats YA toma cada segundo: costo extra ≈ 0.
-/// Los campos `_sum` y `gpu_samples` se saltan en la serialización: solo
-/// alimentan los promedios que ve el renderer.
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionStats {
-    pub samples: u64,
-    #[serde(skip)]
-    pub cpu_sum: f64,
-    #[serde(skip)]
-    pub mem_sum: f64,
-    #[serde(skip)]
-    pub gpu_sum: f64,
-    #[serde(skip)]
-    pub net_sum: f64,
-    #[serde(skip)]
-    pub gpu_samples: u64,
-    pub cpu_max: f64,
-    pub mem_max: f64,
-    pub gpu_max: f64,
-    pub net_max: f64,
-}
-
-impl SessionStats {
-    /// Registra una muestra. `gpu < 0` = sin dato (typeperf aún calibrando):
-    /// se ignora para GPU pero NO invalida el resto de la muestra.
-    pub fn record(&mut self, cpu: f64, mem: f64, gpu: f64, net_bps: f64) {
-        self.samples += 1;
-        self.cpu_sum += cpu;
-        self.mem_sum += mem;
-        self.net_sum += net_bps;
-        self.cpu_max = self.cpu_max.max(cpu);
-        self.mem_max = self.mem_max.max(mem);
-        self.net_max = self.net_max.max(net_bps);
-        if gpu >= 0.0 {
-            self.gpu_sum += gpu;
-            self.gpu_samples += 1;
-            self.gpu_max = self.gpu_max.max(gpu);
-        }
-    }
-
-    pub fn cpu_avg(&self) -> f64 {
-        if self.samples == 0 { 0.0 } else { self.cpu_sum / self.samples as f64 }
-    }
-
-    pub fn mem_avg(&self) -> f64 {
-        if self.samples == 0 { 0.0 } else { self.mem_sum / self.samples as f64 }
-    }
-
-    pub fn gpu_avg(&self) -> f64 {
-        if self.gpu_samples == 0 { 0.0 } else { self.gpu_sum / self.gpu_samples as f64 }
-    }
-
-    pub fn net_avg(&self) -> f64 {
-        if self.samples == 0 { 0.0 } else { self.net_sum / self.samples as f64 }
-    }
-}
-
-pub struct GpuInfoCache {
-    pub at: Instant,
-    pub info: GpuInfo,
-}
-
-/// Estado global accesible por comandos (tauri State) y por los hilos.
-pub struct AppState {
-    pub snapshot: Mutex<Snapshot>,
-    pub procs: Mutex<Vec<ProcInfo>>,
-    /// Uso de GPU en % × 10 (i32 evita f64 atómico): -10 = sin dato.
-    pub gpu_util: AtomicI32,
-    pub temp: Mutex<TempState>,
-    pub gpu_info: Mutex<GpuInfoCache>,
-    pub pinned: AtomicBool,
-    pub mode: Mutex<String>,
-    /// Ventana visible: los hilos de muestreo caros se gatean con esto.
-    pub visible: AtomicBool,
-    /// E/S de disco agregada en B/s (i64 evita f64 atómico): -1 = sin dato.
-    pub disk_read: AtomicI64,
-    pub disk_write: AtomicI64,
-    /// Máximos/promedios desde el arranque (fuente de verdad: Rust).
-    pub session: Mutex<SessionStats>,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            snapshot: Mutex::new(Snapshot {
-                ok: true,
-                temp_status: "none".into(),
-                gpu: -1.0,
-                disk: DiskInfo { read_bytes_sec: -1.0, write_bytes_sec: -1.0 },
-                ..Default::default()
-            }),
-            procs: Mutex::new(Vec::new()),
-            gpu_util: AtomicI32::new(-10),
-            temp: Mutex::new(TempState { celsius: -1.0, status: "none".into() }),
-            gpu_info: Mutex::new(GpuInfoCache {
-                at: Instant::now() - Duration::from_secs(600),
-                info: GpuInfo::default(),
-            }),
-            pinned: AtomicBool::new(true),
-            mode: Mutex::new("dev".into()),
-            visible: AtomicBool::new(true),
-            disk_read: AtomicI64::new(-1),
-            disk_write: AtomicI64::new(-1),
-            session: Mutex::new(SessionStats::default()),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Utilidades
-// ---------------------------------------------------------------------------
-fn round1(n: f64) -> f64 {
-    (n * 10.0).round() / 10.0
-}
-
-fn round2(n: f64) -> f64 {
-    (n * 100.0).round() / 100.0
-}
-
-/// Evita que un PID malicioso derrame bytes nulos en el nombre del proceso.
-fn sanitize(s: &str) -> String {
-    s.replace(['\0', '\r', '\n'], " ").trim().to_string()
-}
-
-/// Fuente de verdad de la visibilidad: actualiza el flag que leen los gating
-/// threads del sampler Y notifica al renderer.
+// Fuente de verdad de la visibilidad: actualiza el flag que leen los gating
+// threads del sampler Y notifica al renderer.
 ///
 /// El evento es imprescindible porque WebView2 NO propaga `document.hidden`
 /// cuando la ventana anfitriona se oculta: sin él, el renderer seguía
@@ -311,51 +114,13 @@ async fn get_gpu_info(state: State<'_, Arc<AppState>>) -> Result<Value, ()> {
 }
 
 /// `Option<i64>`: el puente (tauri-bridge.js) manda `null` para PIDs no
-/// numéricos/inválidos. Con `i64` pelado la deserialización fallaría y el IPC
-/// rechazaría en vez de devolver el JSON `{ ok: false }` esperado.
+/// numéricos/inválidos. La validación y la ejecución (taskkill /F /T) viven
+/// en sysmon_core::kill, compartidas con el binario nativo.
 #[tauri::command]
 fn kill_process(pid: Option<i64>) -> Value {
-    // Validación equivalente a validatePid(): entero positivo, distinto del
-    // widget y no crítico del sistema.
-    let Some(pid) = pid.filter(|p| *p > 0) else {
-        return json!({ "ok": false, "error": "Invalid PID" });
-    };
-    if pid as u32 == std::process::id() {
-        return json!({ "ok": false, "error": "Refusing to kill the widget itself" });
-    }
-    // PID 4 = System (Windows): núcleo del SO, nunca matable desde la IU.
-    #[cfg(windows)]
-    if pid == 4 {
-        return json!({ "ok": false, "error": "Refusing to kill a system-critical process" });
-    }
-    // Windows: taskkill /F /T corta árboles de proceso (process.kill no).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let out = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                // El PID muerto desaparece en el próximo refresh de procesos.
-                json!({ "ok": true, "pid": pid })
-            }
-            Ok(o) => json!({
-                "ok": false,
-                "error": format!(
-                    "Failed to kill process {}: {}",
-                    pid,
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )
-            }),
-            Err(e) => json!({ "ok": false, "error": format!("Failed to kill process {} ({e})", pid) }),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        json!({ "ok": false, "error": "Unsupported platform" })
+    match sysmon_core::kill::kill_process(pid) {
+        Ok(pid) => json!({ "ok": true, "pid": pid }),
+        Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
@@ -498,6 +263,8 @@ fn main() {
 #[cfg(test)]
 mod mode_changed_tests {
     use super::*;
+    use std::sync::Mutex;
+    use sysmon_core::{round2, sanitize, ProcInfo};
     use serde_json::json;
     use tauri::test::{mock_app, mock_builder, noop_assets, mock_context};
     use tauri::{Listener, Manager};
@@ -611,6 +378,8 @@ mod mode_changed_tests {
 #[cfg(test)]
 mod window_state_tests {
     use super::*;
+    use std::sync::Mutex;
+    use sysmon_core::{round2, sanitize, ProcInfo};
     use tauri::test::{mock_builder, mock_context, noop_assets};
     use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
