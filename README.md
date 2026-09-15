@@ -14,7 +14,8 @@ Floating minimalist desktop widget for real-time system monitoring in the corner
 - **6 real-time charts** (charts mode): CPU, temp, RAM, GPU, network and a **disk I/O chart** with read (green) + write (blue) series, both with dynamic auto-scaling Y like the NET chart.
 - **Session stats card** (charts mode): max & average of CPU/RAM/GPU/NET since launch, computed in Rust from the samples it already takes — no extra polling, no disk writes.
 - **Process tooltips**: hovering a Top-5 row shows the PID, the full executable path (resolved once via sysinfo) and its CPU/RAM usage.
-- **Proactive guardian**: native Windows notifications when CPU ≥ 85%, RAM ≥ 90%, GPU ≥ 90% or CPU temp ≥ 80 °C sustained across reads (anti-flood, per-type cooldown).
+- **Proactive guardian with configurable thresholds**: native Windows notifications when CPU, RAM, GPU or CPU temp stay above their thresholds across consecutive reads (anti-flood, per-type cooldown). Tune each threshold from the **⚙ Settings overlay** (−/+ steppers) or via IPC; values persist to `%APPDATA%/SystemMonitorWidget/settings.json`.
+- **Persistent preferences**: mode, pin state, thresholds and window position survive restarts (same `settings.json`; the native binary restores position with edge snapping).
 - **Kill processes** from the Top 5 list with validation in Rust (never the widget itself, never system-critical PIDs).
 - **Tray + global shortcut** `Ctrl+Shift+M` to show/hide, always-on-top toggle, single-instance lock.
 - **Low footprint**: 2.5 s sampling, TTL + single-flight caching for expensive WMI queries, persistent GPU/disk samplers (one `typeperf` child each, no per-cycle process spawns). While hidden, samplers gate by visibility and `typeperf` is suspended via `NtSuspendProcess` — and a Job Object guarantees no orphaned `typeperf.exe` ever outlives the app. Measured overhead of the data round (disk chart + tooltips + session stats): **+0.05 pp CPU visible, ~0 hidden**.
@@ -94,6 +95,8 @@ Notes:
 | `Ctrl+Shift+M` | Toggle widget visibility (global). |
 | Tray icon (click) | Toggle visibility. |
 | Pin button | Always-on-top on/off. |
+| ⚙ button | Settings overlay: guardian threshold steppers (persisted). |
+| Drag header | Move widget — position is saved (native build snaps to screen edges). |
 | KILL button | Kill a process (confirm required). |
 
 ## License

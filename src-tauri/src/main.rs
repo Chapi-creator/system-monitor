@@ -164,6 +164,13 @@ fn set_widget_mode<R: Runtime>(
         }
         *current = mode.clone();
     }
+    // Persistir el modo: al arrancar de nuevo, el widget reaparece en el
+    // modo en que se dejó (lo aplica el renderer leyendo get_settings).
+    {
+        let mut st = state.settings.lock().unwrap();
+        st.mode = mode.clone();
+        let _ = st.save();
+    }
     let (w, h) = if mode == "mini" { (WIDGET_W, MINI_H) } else { (WIDGET_W, WIDGET_H) };
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_size(LogicalSize::new(w, h));
@@ -202,6 +209,79 @@ fn show_widget<R: Runtime>(app: AppHandle<R>) {
     set_visible_state(&app, true);
 }
 
+/// Preferencias persistidas completas (modo, pin, umbrales, posición).
+#[tauri::command]
+fn get_settings(state: State<'_, Arc<AppState>>) -> Value {
+    let st = state.settings.lock().unwrap().clone();
+    json!({ "ok": true, "settings": st })
+}
+
+/// Ajusta un umbral con valor ABSOLUTO (contrato de set_threshold) y emite
+/// 'thresholds-changed' para que el guardián del renderer siga el cambio.
+#[tauri::command]
+fn set_threshold<R: Runtime>(
+    app: AppHandle<R>,
+    kind: Option<String>,
+    value: Option<f64>,
+    state: State<'_, Arc<AppState>>,
+) -> Value {
+    apply_threshold(app, kind, value, state, ThresholdChange::Absolute)
+}
+
+/// Ajusta un umbral con DESFASE (delta) sobre el valor vigente, con clamp.
+/// Es la variante que usan los steppers del overlay de Ajustes: manda −5/+5
+/// y el backend resuelve el valor final; así nunca se pisa un cambio hecho
+/// en otra sesión y el clamp es consistente.
+#[tauri::command]
+fn set_threshold_delta<R: Runtime>(
+    app: AppHandle<R>,
+    kind: Option<String>,
+    delta: Option<f64>,
+    state: State<'_, Arc<AppState>>,
+) -> Value {
+    apply_threshold(app, kind, delta, state, ThresholdChange::Delta)
+}
+
+/// Modo de ajuste de umbral: valor absoluto o desfase sobre el vigente.
+enum ThresholdChange {
+    Absolute,
+    Delta,
+}
+
+/// Núcleo compartido de set_threshold/set_threshold_delta: valida, aplica,
+/// persiste y emite 'thresholds-changed' (el backend es la fuente de verdad).
+fn apply_threshold<R: Runtime>(
+    app: AppHandle<R>,
+    kind: Option<String>,
+    value: Option<f64>,
+    state: State<'_, Arc<AppState>>,
+    change: ThresholdChange,
+) -> Value {
+    let Some(kind) = kind.filter(|k| matches!(k.as_str(), "cpu" | "ram" | "gpu" | "temp")) else {
+        return json!({ "ok": false, "error": "Invalid kind" });
+    };
+    let Some(value) = value.filter(|v| v.is_finite()) else {
+        return json!({ "ok": false, "error": "Invalid value" });
+    };
+    let mut st = state.settings.lock().unwrap();
+    let current = match kind.as_str() {
+        "cpu" => st.thresholds.cpu,
+        "ram" => st.thresholds.ram,
+        "gpu" => st.thresholds.gpu,
+        _ => st.thresholds.temp,
+    };
+    let target = match change {
+        ThresholdChange::Absolute => value,
+        ThresholdChange::Delta => current + value,
+    };
+    st.thresholds.set(&kind, target);
+    let _ = st.save();
+    // Un cambio directo por IPC (tests, atajos) o delta de steppers debe
+    // reflejarse en el guardián del renderer sin recargar.
+    let _ = app.emit("thresholds-changed", st.thresholds);
+    json!({ "ok": true, "thresholds": st.thresholds })
+}
+
 // ---------------------------------------------------------------------------
 // Arranque de la app
 // ---------------------------------------------------------------------------
@@ -230,6 +310,20 @@ fn main() {
         .manage(Arc::new(AppState::default()))
         .setup(|app| {
             let state = app.state::<Arc<AppState>>().inner().clone();
+
+            // Preferencias persistidas (modo, pin, umbrales, posición): se
+            // cargan al arranque. El modo lo aplica el renderer al leer
+            // get_settings; pin y posición se restauran aquí.
+            let loaded = sysmon_core::settings::Settings::load();
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_always_on_top(loaded.pinned);
+                if let (Some(x), Some(y)) = (loaded.x, loaded.y) {
+                    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+                }
+            }
+            state.pinned.store(loaded.pinned, Ordering::SeqCst);
+            *state.settings.lock().unwrap() = loaded;
+
             sampler::spawn_all(state);
 
             build_tray(app)?;
@@ -241,6 +335,15 @@ fn main() {
                 api.prevent_close();
                 let _ = window.hide();
                 set_visible_state(window.app_handle(), false);
+            }
+            // Arrastrar el widget persiste la posición (física, igual que la
+            // que se restaura al arrancar) para que reaparezca donde lo dejaste.
+            WindowEvent::Moved(phys) => {
+                let state = window.app_handle().state::<Arc<AppState>>();
+                let mut st = state.settings.lock().unwrap();
+                st.x = Some(phys.x);
+                st.y = Some(phys.y);
+                let _ = st.save();
             }
             _ => {}
         })
@@ -254,7 +357,10 @@ fn main() {
             get_always_on_top,
             set_widget_mode,
             hide_widget,
-            show_widget
+            show_widget,
+            get_settings,
+            set_threshold,
+            set_threshold_delta
         ])
         .run(tauri::generate_context!())
         .expect("error while running System Monitor Widget");
@@ -272,7 +378,13 @@ mod mode_changed_tests {
     /// App mock con el MISMO estado global que la app real (AppState por defecto
     /// = modo 'dev', visible). El contexto mock usa los assets noop: sin webview
     /// real, perfecto para verificar la emisión del evento.
+    ///
+    /// SYSMON_SETTINGS_DIR a un temporal: los tests de comandos PERSISTEN
+    /// settings; sin aislamiento pisarían el settings real del usuario.
     fn test_app() -> tauri::App<tauri::test::MockRuntime> {
+        let dir = std::env::temp_dir().join(format!("sysmon-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("SYSMON_SETTINGS_DIR", dir.join("settings.json"));
         mock_builder()
             .build(mock_context(noop_assets()))
             .expect("mock app")
@@ -362,6 +474,39 @@ mod mode_changed_tests {
             "un evento por cambio, en orden"
         );
         app.cleanup_before_exit();
+    }
+
+    #[test]
+    fn get_settings_devuelve_estado_y_set_threshold_clampea() {
+        let app = test_app();
+        let state = Arc::new(AppState::default());
+        app.manage(state.clone());
+        let handle = app.handle().clone();
+
+        // set_threshold con kind inválido → ok:false
+        let bad = set_threshold(handle.clone(), Some("nope".into()), Some(50.0), app.state::<Arc<AppState>>());
+        assert_eq!(bad["ok"], json!(false));
+
+        // set_threshold con valor no finito → ok:false
+        let nan = set_threshold(handle.clone(), Some("cpu".into()), Some(f64::NAN), app.state::<Arc<AppState>>());
+        assert_eq!(nan["ok"], json!(false));
+
+        // Valor válido pero fuera de rango → clamped a [1,100]
+        let clamped = set_threshold(handle.clone(), Some("cpu".into()), Some(5000.0), app.state::<Arc<AppState>>());
+        assert_eq!(clamped["ok"], json!(true));
+        assert_eq!(clamped["thresholds"]["cpu"], json!(100.0));
+
+        // set_threshold_delta: +(-120) sobre 100 → clamp al mínimo (1.0)
+        let delta = set_threshold_delta(handle.clone(), Some("cpu".into()), Some(-120.0), app.state::<Arc<AppState>>());
+        assert_eq!(delta["ok"], json!(true));
+        assert_eq!(delta["thresholds"]["cpu"], json!(1.0));
+
+        // El estado global quedó actualizado y get_settings lo refleja
+        let st = state.settings.lock().unwrap().clone();
+        assert_eq!(st.thresholds.cpu, 1.0);
+        let got = get_settings(app.state::<Arc<AppState>>());
+        assert_eq!(got["settings"]["thresholds"]["cpu"], json!(1.0));
+        assert!(got["settings"]["mode"].is_string());
     }
 
     #[test]

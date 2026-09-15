@@ -7,6 +7,9 @@
 pub mod format;
 pub mod kill;
 pub mod sampler;
+pub mod settings;
+
+use settings::Settings;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
 use std::sync::Mutex;
@@ -169,6 +172,9 @@ pub struct AppState {
     pub disk_write: AtomicI64,
     /// Máximos/promedios desde el arranque (fuente de verdad: Rust).
     pub session: Mutex<SessionStats>,
+    /// Preferencias persistidas (modo, pin, umbrales, posición). La cargan
+    /// los binarios al arrancar (Settings::load) y guardan al cambiar algo.
+    pub settings: Mutex<Settings>,
 }
 
 impl Default for AppState {
@@ -194,6 +200,7 @@ impl Default for AppState {
             disk_read: AtomicI64::new(-1),
             disk_write: AtomicI64::new(-1),
             session: Mutex::new(SessionStats::default()),
+            settings: Mutex::new(Settings::default()),
         }
     }
 }

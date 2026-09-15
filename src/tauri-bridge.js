@@ -40,6 +40,26 @@
     setWidgetMode: (mode) => invoke('set_widget_mode', { mode: toMode(mode) }),
     /** Metadatos de GPU: modelo, driver, VRAM (cacheado en Rust). */
     getGpuInfo: () => invoke('get_gpu_info'),
+    /** Preferencias persistidas (modo, pin, umbrales, posición). */
+    getSettings: () => invoke('get_settings'),
+    /**
+     * Ajusta un umbral del guardián: kind 'cpu'|'ram'|'gpu'|'temp', valor
+     * absoluto finito (Rust lo clampa a su rango). → { ok, thresholds }
+     */
+    setThreshold: (kind, value) => {
+      const k = typeof kind === 'string' && ['cpu', 'ram', 'gpu', 'temp'].includes(kind) ? kind : null;
+      const v = Number(value);
+      return invoke('set_threshold', { kind: k, value: Number.isFinite(v) ? v : null });
+    },
+    /**
+     * Aplica un DESFASE (±delta) al umbral: el backend suma al valor vigente.
+     * Es lo que usan los steppers del overlay de Ajustes. → { ok, thresholds }
+     */
+    setThresholdDelta: (kind, delta) => {
+      const k = typeof kind === 'string' && ['cpu', 'ram', 'gpu', 'temp'].includes(kind) ? kind : null;
+      const d = Number(delta);
+      return invoke('set_threshold_delta', { kind: k, delta: Number.isFinite(d) ? d : null });
+    },
     /**
      * Oculta la ventana a la bandeja SIN destruir el webview.
      * NUNCA usar window.close() aquí: wry (WebView2) responde destruyendo el
@@ -68,6 +88,18 @@
       const handler = internals.transformCallback((event) => cb(event?.payload));
       return invoke('plugin:event|listen', {
         event: 'mode-changed',
+        target: { kind: 'Any' },
+        handler,
+      });
+    },
+    /**
+     * Suscripción a cambios de umbrales (backend = fuente de verdad): cubre
+     * ajustes por IPC directo o desde el binario nativo.
+     */
+    onThresholdsChanged: (cb) => {
+      const handler = internals.transformCallback((event) => cb(event?.payload));
+      return invoke('plugin:event|listen', {
+        event: 'thresholds-changed',
         target: { kind: 'Any' },
         handler,
       });

@@ -42,6 +42,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use sysmon_core::kill;
+use sysmon_core::settings::Settings;
 use sysmon_core::{sampler, AppState};
 
 // ---------------------------------------------------------------------------
@@ -59,10 +60,7 @@ const METRICS_MS: u32 = 2500;
 // Guardián proactivo (port del renderer): streaks + latch + cooldown, y en
 // vez de Notification() HTML5 → globos de la bandeja.
 // ---------------------------------------------------------------------------
-const TH_CPU: f64 = 85.0;
-const TH_TEMP: f64 = 80.0;
-const TH_GPU: f64 = 90.0;
-const TH_RAM: f64 = 90.0;
+
 const STREAK_NEEDED: u32 = 2;
 const COOLDOWN: Duration = Duration::from_secs(60);
 
@@ -76,6 +74,19 @@ struct Guardian {
     gpu_fired: bool,
     ram_fired: bool,
     last: [Instant; 4],
+}
+
+/// Snapshot de los umbrales vigentes (configurables desde Ajustes).
+struct Th {
+    cpu: f64,
+    ram: f64,
+    gpu: f64,
+    temp: f64,
+}
+
+fn thresholds_of(app: &AppState) -> Th {
+    let t = app.settings.lock().unwrap().thresholds;
+    Th { cpu: t.cpu, ram: t.ram, gpu: t.gpu, temp: t.temp }
 }
 
 impl Default for Guardian {
@@ -107,9 +118,12 @@ impl Guardian {
         let used_gb = snap.memory.used_gb;
         let total_gb = snap.memory.total_gb;
         drop(snap);
+        // Umbrales CONFIGURABLES: se leen de settings en cada tick (un Mutex
+        // lock trivial) para que un cambio en Ajustes aplique al instante.
+        let th = thresholds_of(app);
 
         // CPU
-        if cpu > TH_CPU {
+        if cpu > th.cpu {
             self.cpu_streak += 1;
             if self.cpu_streak >= STREAK_NEEDED && !self.cpu_fired && self.ready(0) {
                 self.cpu_fired = true;
@@ -118,7 +132,7 @@ impl Guardian {
                     tray_balloon(
                         hwnd,
                         "\u{26A0}\u{FE0F} CPU Alert",
-                        &format!("CPU {:.1}% sostenida sobre {}%", cpu, TH_CPU),
+                        &format!("CPU {:.1}% sostenida sobre {}%", cpu, th.cpu),
                     );
                 }
             }
@@ -128,7 +142,7 @@ impl Guardian {
         }
 
         // TEMP (-1 = sin sensor: nunca alerta).
-        if temp > 0.0 && temp >= TH_TEMP {
+        if temp > 0.0 && temp >= th.temp {
             self.temp_streak += 1;
             if self.temp_streak >= STREAK_NEEDED && !self.temp_fired && self.ready(1) {
                 self.temp_fired = true;
@@ -137,7 +151,7 @@ impl Guardian {
                     tray_balloon(
                         hwnd,
                         "\u{1F321}\u{FE0F} Thermal Alert",
-                        &format!("CPU {}°C sostenida sobre {}°C", temp as u32, TH_TEMP),
+                        &format!("CPU {}°C sostenida sobre {}°C", temp as u32, th.temp),
                     );
                 }
             }
@@ -147,7 +161,7 @@ impl Guardian {
         }
 
         // GPU (-1 = contadores aún no disponibles: nunca alerta).
-        if gpu > 0.0 && gpu >= TH_GPU {
+        if gpu > 0.0 && gpu >= th.gpu {
             self.gpu_streak += 1;
             if self.gpu_streak >= STREAK_NEEDED && !self.gpu_fired && self.ready(2) {
                 self.gpu_fired = true;
@@ -156,7 +170,7 @@ impl Guardian {
                     tray_balloon(
                         hwnd,
                         "\u{1F3AE} GPU Alert",
-                        &format!("GPU {:.1}% sostenida sobre {}%", gpu, TH_GPU),
+                        &format!("GPU {:.1}% sostenida sobre {}%", gpu, th.gpu),
                     );
                 }
             }
@@ -166,7 +180,7 @@ impl Guardian {
         }
 
         // RAM
-        if ram >= TH_RAM {
+        if ram >= th.ram {
             self.ram_streak += 1;
             if self.ram_streak >= STREAK_NEEDED && !self.ram_fired && self.ready(3) {
                 self.ram_fired = true;
@@ -177,7 +191,7 @@ impl Guardian {
                         "\u{1F9E0} RAM Alert",
                         &format!(
                             "Memoria {:.1}% sostenida sobre {}% ({:.1}/{:.1} GB)",
-                            ram, TH_RAM, used_gb, total_gb
+                            ram, th.ram, used_gb, total_gb
                         ),
                     );
                 }
@@ -307,13 +321,18 @@ unsafe fn set_visible(app: &mut App, hwnd: HWND, visible: bool) {
 }
 
 /// Cambia de modo: redimensiona la ventana (el backend es la fuente de verdad,
-/// igual que set_widget_mode en la variante Tauri).
+/// igual que set_widget_mode en la variante Tauri) y PERSISTE el modo.
 unsafe fn set_mode(app: &mut App, hwnd: HWND, mode: &'static str) {
     if app.ui.mode == mode {
         return;
     }
     app.ui.mode = mode;
     *app.state.mode.lock().unwrap() = mode.to_string();
+    {
+        let mut st = app.state.settings.lock().unwrap();
+        st.mode = mode.to_string();
+        let _ = st.save();
+    }
     let (w, h) = ui::mode_size(mode);
     let _ = SetWindowPos(
         hwnd,
@@ -329,6 +348,47 @@ unsafe fn set_mode(app: &mut App, hwnd: HWND, mode: &'static str) {
         app.push_metrics();
     }
     InvalidateRect(Some(hwnd), None, false);
+}
+
+/// Guarda el modo/pin/posición vigentes (un solo JSON atómico).
+fn persist(app: &App) {
+    let mut st = app.state.settings.lock().unwrap();
+    st.mode = app.ui.mode.to_string();
+    st.pinned = app.state.pinned.load(Ordering::SeqCst);
+    let _ = st.save();
+}
+
+/// Posición actual de la ventana en píxeles físicos de pantalla.
+unsafe fn window_pos(hwnd: HWND) -> (i32, i32) {
+    // GetWindowRect da directamente el origen de la ventana en coords de pantalla.
+    let mut wr = RECT::default();
+    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+    (wr.left, wr.top)
+}
+
+/// Snap del borde: si la ventana quedó a ≤ 16 px de un borde de la pantalla
+/// primaria, se imanta a él. Devuelve la posición final.
+unsafe fn snap_edge(hwnd: HWND) -> (i32, i32) {
+    let mut wr = RECT::default();
+    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+    let sw = GetSystemMetrics(SM_CXSCREEN);
+    let sh = GetSystemMetrics(SM_CYSCREEN);
+    const SNAP: i32 = 16;
+    let mut x = wr.left;
+    let mut y = wr.top;
+    if x.abs() <= SNAP {
+        x = 0;
+    }
+    if (sw - wr.right).abs() <= SNAP {
+        x = sw - (wr.right - wr.left);
+    }
+    if y.abs() <= SNAP {
+        y = 0;
+    }
+    if (sh - wr.bottom).abs() <= SNAP {
+        y = sh - (wr.bottom - wr.top);
+    }
+    (x, y)
 }
 
 /// Hit-test de los controles dibujados (coords lógicas).
@@ -465,6 +525,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             set_visible(app, hwnd, false);
             LRESULT(0)
         }
+        WM_EXITSIZEMOVE => {
+            // Al soltar la ventana (drag terminado): imantar a los bordes
+            // cercanos y persistir la posición para el próximo arranque.
+            let (x, y) = snap_edge(hwnd);
+            if (x, y) != window_pos(hwnd) {
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            let (x, y) = window_pos(hwnd);
+            {
+                let mut st = app.state.settings.lock().unwrap();
+                st.x = Some(x);
+                st.y = Some(y);
+                let _ = st.save();
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
             tray_del(hwnd);
             PostQuitMessage(0);
@@ -554,6 +630,27 @@ unsafe fn handle_action(app: &mut App, hwnd: HWND, action: ui::Action) {
                 InvalidateRect(Some(hwnd), None, false);
             }
         }
+        ui::Action::ToggleSettings => {
+            app.ui.show_settings = !app.ui.show_settings;
+            InvalidateRect(Some(hwnd), None, false);
+        }
+        ui::Action::Th(field, delta) => {
+            {
+                let mut st = app.state.settings.lock().unwrap();
+                let cur = match field {
+                    "cpu" => Some(st.thresholds.cpu),
+                    "ram" => Some(st.thresholds.ram),
+                    "gpu" => Some(st.thresholds.gpu),
+                    "temp" => Some(st.thresholds.temp),
+                    _ => None,
+                };
+                if let Some(v) = cur {
+                    st.thresholds.set(field, v + delta as f64);
+                    let _ = st.save();
+                }
+            }
+            InvalidateRect(Some(hwnd), None, false);
+        }
     }
 }
 
@@ -593,8 +690,20 @@ fn main() -> windows::core::Result<()> {
         };
         RegisterClassW(&wc);
 
-        // Estado compartido (el MISMO que la variante Tauri).
+        // Estado compartido (el MISMO que la variante Tauri), con las
+        // preferencias persistidas cargadas al arranque (modo, pin, umbrales,
+        // posición). Cargar NUNCA falla: dispares → defaults.
+        let loaded = Settings::load();
+        let start_mode: &'static str = match loaded.mode.as_str() {
+            "mini" => "mini",
+            "charts" => "charts",
+            "procs" => "procs",
+            _ => "dev",
+        };
+        let start_pinned = loaded.pinned;
+        let (saved_x, saved_y) = (loaded.x, loaded.y);
         let state = Arc::new(AppState::default());
+        *state.settings.lock().unwrap() = loaded;
         sampler::spawn_all(state.clone());
         spawn_gpu_info(state.clone());
 
@@ -616,17 +725,21 @@ fn main() -> windows::core::Result<()> {
             guardian: Guardian::default(),
         });
 
-        // Ventana frameless siempre visible, arriba a la derecha del primario.
+        // Ventana frameless: posición guardada o esquina superior derecha.
         let cx = GetSystemMetrics(SM_CXSCREEN);
-        let (lw, lh) = ui::mode_size("dev");
+        let (lw, lh) = ui::mode_size(start_mode);
         let (pw, ph) = (logical_to_physical(lw, scale), logical_to_physical(lh, scale));
+        let (px, py) = match (saved_x, saved_y) {
+            (Some(x), Some(y)) => (x, y),
+            _ => (cx - pw - 24, 96),
+        };
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | if start_pinned { WS_EX_TOPMOST } else { WINDOW_EX_STYLE(0) },
             class_name,
             w!("System Monitor Widget"),
             WS_POPUP,
-            cx - pw - 24,
-            96,
+            px,
+            py,
             pw,
             ph,
             None,
@@ -640,7 +753,23 @@ fn main() -> windows::core::Result<()> {
         // Volver a tomar el puntero para configurar lo que necesita el HWND.
         let app = &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App);
         app.gfx = Some(ui::create_gfx(hwnd, pw as u32, ph as u32)?);
+        app.ui.mode = start_mode;
+        app.ui.pinned = start_pinned;
+        *app.state.mode.lock().unwrap() = start_mode.to_string();
+        app.state.pinned.store(start_pinned, Ordering::SeqCst);
         app.state.visible.store(true, Ordering::SeqCst);
+        if !start_pinned {
+            // El topmost es parte del estilo: sin pin, quitarlo tras crear.
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
 
         // Temporizadores + hotkey + bandeja.
         SetTimer(Some(hwnd), TIMER_METRICS, METRICS_MS, None);

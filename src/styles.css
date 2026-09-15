@@ -687,3 +687,70 @@ body {
   padding: 6px 0;
 }
 
+
+/* ---------- Overlay de Ajustes (umbrales del guardián) ---------- */
+/* Cubre el cuerpo del widget en cualquier modo; la cabecera queda libre. */
+.settings-overlay {
+  position: absolute;
+  inset: 36px 0 0 0; /* deja la cabecera (36 px) visible y arrastrable */
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.settings-overlay[hidden] { display: none; }
+
+.settings-overlay__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* .widget es flex-column: el overlay absolute necesita un ancla posicionada */
+.widget { position: relative; }
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-row__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--text);
+}
+
+.settings-row__stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row__stepper .mini-btn {
+  width: 26px;
+  padding: 3px 0;
+  text-align: center;
+  font-size: 12px;
+}
+
+.settings-row__value {
+  min-width: 44px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--cyan);
+}
+
+.settings-note {
+  margin-top: auto;
+  font-size: 9px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}

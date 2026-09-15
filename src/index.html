@@ -22,6 +22,7 @@
       <button id="btn-dev" class="icon-btn icon-btn--active" title="Modo Dev &amp; Diagnóstico" aria-label="Modo dev">&#9638;</button>
       <button id="btn-charts" class="icon-btn" title="Modo Gráficas en tiempo real" aria-label="Modo gráficas">&#9636;</button>
       <button id="btn-procs" class="icon-btn" title="Top Procesos (CPU)" aria-label="Modo procesos">&#9776;</button>
+      <button id="btn-settings" class="icon-btn" title="Ajustes (umbrales de alertas)" aria-label="Ajustes">&#9881;</button>
       <button id="btn-close" class="icon-btn" title="Ocultar (queda en bandeja · Ctrl+Shift+M)" aria-label="Cerrar">&#10005;</button>
     </header>
 
@@ -216,6 +217,52 @@
         </article>
       </div>
     </section>
+
+    <!-- ============ Overlay de Ajustes (encima del modo activo) ============ -->
+    <div id="settings-overlay" class="settings-overlay" hidden>
+      <div class="settings-overlay__head">
+        <span class="card__label">AJUSTES · UMBRALES DE ALERTA</span>
+        <button id="settings-close" class="icon-btn" title="Cerrar ajustes" aria-label="Cerrar ajustes">&#10005;</button>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-row__label">CPU</span>
+        <div class="settings-row__stepper">
+          <button data-th="cpu" data-step="-5" class="mini-btn" title="-5%">−</button>
+          <span id="th-cpu-val" class="settings-row__value">85%</span>
+          <button data-th="cpu" data-step="5" class="mini-btn" title="+5%">+</button>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-row__label">RAM</span>
+        <div class="settings-row__stepper">
+          <button data-th="ram" data-step="-5" class="mini-btn" title="-5%">−</button>
+          <span id="th-ram-val" class="settings-row__value">90%</span>
+          <button data-th="ram" data-step="5" class="mini-btn" title="+5%">+</button>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-row__label">GPU</span>
+        <div class="settings-row__stepper">
+          <button data-th="gpu" data-step="-5" class="mini-btn" title="-5%">−</button>
+          <span id="th-gpu-val" class="settings-row__value">90%</span>
+          <button data-th="gpu" data-step="5" class="mini-btn" title="+5%">+</button>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-row__label">TEMP</span>
+        <div class="settings-row__stepper">
+          <button data-th="temp" data-step="-5" class="mini-btn" title="-5°C">−</button>
+          <span id="th-temp-val" class="settings-row__value">80°C</span>
+          <button data-th="temp" data-step="5" class="mini-btn" title="+5°C">+</button>
+        </div>
+      </div>
+
+      <p class="settings-note">Las alertas se disparan tras 2 lecturas consecutivas por encima del umbral.</p>
+    </div>
 
   </main>
 

@@ -35,7 +35,7 @@ async function main() {
 
   console.log('=== 1. Superficie IPC ===');
   const apiShape = await evalJs(`Object.keys(window.api || {}).sort().join(',')`);
-  check('window.api con 12 métodos', apiShape === 'getAlwaysOnTop,getGpuInfo,getSessionStats,getSystemStats,getTopProcesses,hideWidget,killProcess,onModeChanged,onVisibilityChanged,setWidgetMode,showWidget,toggleAlwaysOnTop', apiShape);
+  check('window.api con 16 métodos', apiShape === 'getAlwaysOnTop,getGpuInfo,getSessionStats,getSettings,getSystemStats,getTopProcesses,hideWidget,killProcess,onModeChanged,onThresholdsChanged,onVisibilityChanged,setThreshold,setThresholdDelta,setWidgetMode,showWidget,toggleAlwaysOnTop', apiShape);
 
   console.log('\n=== 2. Métricas en vivo (get-system-stats) ===');
   const s1 = await evalJs(`window.api.getSystemStats().then(s => s)`);

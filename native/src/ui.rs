@@ -52,6 +52,10 @@ pub enum Action {
     Close,
     Kill(u32),
     Expand, // desde mini → dev
+    /// Abre/cierra el overlay de Ajustes (no es un modo: no se persiste).
+    ToggleSettings,
+    /// Ajusta un umbral por nombre ("cpu"|"ram"|"gpu"|"temp") en ±delta.
+    Th(&'static str, f32),
 }
 
 pub struct HitRect {
@@ -99,6 +103,8 @@ pub struct Gfx {
 
 struct Brushes {
     bg: ID2D1SolidColorBrush,
+    /// Velo semitransparente del overlay de Ajustes.
+    scrim: ID2D1SolidColorBrush,
     card: ID2D1SolidColorBrush,
     card_hover: ID2D1SolidColorBrush,
     border: ID2D1SolidColorBrush,
@@ -141,6 +147,10 @@ pub fn create_gfx(hwnd: HWND, width: u32, height: u32) -> windows::core::Result<
         };
         let b = Brushes {
             bg: mk(COL_BG)?,
+            scrim: rt.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.65 },
+                None,
+            )?,
             card: mk(COL_CARD)?,
             card_hover: mk(COL_CARD_HOVER)?,
             border: mk(COL_BORDER)?,
@@ -215,6 +225,8 @@ impl Gfx {
 pub struct UiState {
     pub mode: &'static str,
     pub pinned: bool,
+    /// Overlay de Ajustes abierto (transitorio, jamás se persiste como modo).
+    pub show_settings: bool,
     pub hover_btn: Option<Action>,
     pub hover_row: Option<usize>,
     pub history: History,
@@ -258,6 +270,7 @@ impl Default for UiState {
         Self {
             mode: "dev",
             pinned: true,
+            show_settings: false,
             hover_btn: None,
             hover_row: None,
             history: History {
@@ -393,9 +406,82 @@ pub fn draw(gfx: &Gfx, ctx: &mut DrawCtx) {
         _ => draw_dev(gfx, ctx, hdr_h),
     }
 
+    // Overlay de Ajustes al final: tapa al modo y sus hits se registran
+    // DESPUÉS (el hit-test recorre en reversa, así que el overlay gana).
+    if ctx.ui.show_settings {
+        draw_settings(gfx, ctx, hdr_h);
+    }
+
     unsafe {
         let _ = gfx.rt.EndDraw(None, None);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Overlay de Ajustes: umbrales del guardián con steppers ± (se guarda solo)
+// ---------------------------------------------------------------------------
+fn draw_settings(gfx: &Gfx, ctx: &mut DrawCtx, hdr_h: f32) {
+    let s = ctx.scale;
+    let x0 = 8.0 * s;
+    let cw = ctx.w - 2.0 * x0;
+    let y0 = hdr_h + 8.0 * s;
+    let h = 196.0 * s;
+
+    // Velo + tarjeta.
+    unsafe {
+        gfx.rt.FillRectangle(
+            &D2D_RECT_F { left: 0.0, top: 0.0, right: ctx.w, bottom: ctx.h },
+            &gfx.b.scrim,
+        );
+    }
+    let r = RECT_F::new(x0, y0, x0 + cw, y0 + h);
+    gfx.card(r, false);
+    gfx.text(
+        "AJUSTES — UMBRALES DE ALERTA",
+        &gfx.f10_b,
+        RECT_F::new(x0 + 12.0 * s, y0 + 8.0 * s, x0 + cw - 12.0 * s, y0 + 24.0 * s),
+        &gfx.b.dim,
+    );
+
+    let th = ctx.app.settings.lock().unwrap().thresholds;
+    let rows: [(&str, &str, f64, &ID2D1SolidColorBrush); 4] = [
+        ("CPU", "%", th.cpu, &gfx.b.cyan),
+        ("RAM", "%", th.ram, &gfx.b.magenta),
+        ("GPU", "%", th.gpu, &gfx.b.violet),
+        ("TEMP", "°C", th.temp, &gfx.b.amber),
+    ];
+    let mut ry = y0 + 30.0 * s;
+    let step = 5.0_f32;
+    for (label, unit, value, brush) in rows.iter() {
+        gfx.text(label, &gfx.f10_l, RECT_F::new(x0 + 12.0 * s, ry + 4.0 * s, x0 + 60.0 * s, ry + 22.0 * s), &gfx.b.txt);
+        let val = format!("{}{}", if *unit == "°C" { format!("{}", *value as u32) } else { format!("{:.0}", value) }, unit);
+        gfx.text(&val, &gfx.f11_r, RECT_F::new(x0 + 70.0 * s, ry + 3.0 * s, x0 + 150.0 * s, ry + 23.0 * s), brush);
+
+        // Botones [-] y [+].
+        let bw = 30.0 * s;
+        let bh = 22.0 * s;
+        let by = ry + 1.0 * s;
+        let minus = RECT_F::new(x0 + cw - 2.0 * bw - 18.0 * s, by, x0 + cw - bw - 18.0 * s, by + bh);
+        let plus = RECT_F::new(x0 + cw - bw - 12.0 * s, by, x0 + cw - 12.0 * s, by + bh);
+        for (btn_r, glyph, delta) in [(&minus, "\u{2212}", -step), (&plus, "+", step)] {
+            let hover = ctx.ui.hover_btn.map(|a| matches!(a, Action::Th(k, d) if k == *label && d == delta)).unwrap_or(false);
+            unsafe {
+                gfx.rt.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT { rect: rect_f(*btn_r), radiusX: 4.0 * s, radiusY: 4.0 * s },
+                    if hover { &gfx.b.border } else { &gfx.b.track },
+                );
+            }
+            gfx.text(glyph, &gfx.f_sym, *btn_r, &gfx.b.txt);
+            ctx.ui.hits.push(HitRect { rect: *btn_r, action: Action::Th(label, delta) });
+        }
+        ry += 30.0 * s;
+    }
+    gfx.text(
+        "clic en \u{2699} para cerrar · los cambios se guardan solos",
+        &gfx.f9_l,
+        RECT_F::new(x0 + 12.0 * s, ry + 2.0 * s, x0 + cw - 12.0 * s, ry + 18.0 * s),
+        &gfx.b.dim,
+    );
 }
 
 fn draw_header(gfx: &Gfx, ctx: &mut DrawCtx, hdr_h: f32) {
@@ -434,13 +520,14 @@ fn draw_header(gfx: &Gfx, ctx: &mut DrawCtx, hdr_h: f32) {
     let btn = 26.0 * s;
     let gap = 2.0 * s;
     let mut x = w - 6.0 * s - btn;
-    let buttons: [(Action, &str); 6] = [
+    let buttons: [(Action, &str); 7] = [
         (Action::Close, "\u{2715}"),
         (Action::Mode("procs"), "\u{2630}"),
         (Action::Mode("charts"), "\u{25D4}"),
         (Action::Mode("dev"), "\u{25A6}"),
         (Action::Mode("mini"), "\u{25A1}"),
         (Action::Pin, "\u{1F4CC}"),
+        (Action::ToggleSettings, "\u{2699}"),
     ];
     for (action, glyph) in buttons.iter() {
         // El pin activo y el modo activo se pintan resaltados.

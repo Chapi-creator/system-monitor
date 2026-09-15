@@ -23,13 +23,16 @@ const MAX_POINTS = 20;             // Límite estricto del historial de gráfica
 
 // Umbrales del guardián proactivo: TODAS las métricas cubiertas.
 // Centralizados en un solo objeto para no repetir valores hardcodeados en el
-// guardián, el renderizado Dev y el mini overlay. Editar aquí afecta a todos.
-const THRESHOLDS = Object.freeze({
+// guardián, el renderizado Dev y el mini overlay.
+// MUTABLE: los steppers del overlay Ajustes los actualizan vía
+// set_threshold en Rust (que persiste y clampa); el guardián y el coloreado
+// de alertas siempre leen los umbrales vigentes.
+const THRESHOLDS = {
   cpu: 85,   // % de CPU sostenida.
   temp: 80,  // °C del paquete CPU.
   gpu: 90,   // % de GPU sostenida.
   ram: 90,   // % de RAM sostenida.
-});
+};
 const ALERT_STREAK_FOR_NOTIFICATION = 2; // 2 lecturas consecutivas = ~5 s.
 const NOTIFY_COOLDOWN_MS = 60_000; // Anti-flood entre notificaciones.
 const TEMP_INVALID = -1;           // Sentinel: sensor no disponible.
@@ -42,7 +45,10 @@ const el = {
   btnDev: document.getElementById('btn-dev'),
   btnCharts: document.getElementById('btn-charts'),
   btnProcs: document.getElementById('btn-procs'),
+  btnSettings: document.getElementById('btn-settings'),
   btnClose: document.getElementById('btn-close'),
+  // Overlay de Ajustes
+  settingsOverlay: document.getElementById('settings-overlay'),
   // Modo mini
   modeMini: document.getElementById('mode-mini'),
   miniCpuBar: document.getElementById('mini-cpu-bar'),
@@ -149,7 +155,55 @@ function applyModeUI(mode) {
   el.btnDev.classList.toggle('icon-btn--active', mode === 'dev');
   el.btnCharts.classList.toggle('icon-btn--active', isCharts);
   el.btnProcs.classList.toggle('icon-btn--active', isProcs);
+  if (el.btnSettings) el.btnSettings.classList.toggle('icon-btn--active', el.settingsOverlay && !el.settingsOverlay.hidden);
 }
+
+/**
+ * Ajusta un umbral vía IPC y repinta el overlay de Ajustes.
+ * @param {string} kind 'cpu' | 'ram' | 'gpu' | 'temp'
+ * @param {number} delta DESFASE a aplicar (±5), NO valor absoluto: el backend
+ *   lo suma al valor vigente y clampa, así el stepper funciona igual aunque el
+ *   usuario ya haya movido el umbral en otra sesión.
+ */
+async function adjustThreshold(kind, delta) {
+  try {
+    const res = await window.api.setThresholdDelta(kind, delta);
+    if (res?.ok && res.thresholds) {
+      Object.assign(THRESHOLDS, res.thresholds);
+      renderSettingsValues();
+    }
+  } catch { /* sin backend (fuera de Tauri): ignorado */ }
+}
+
+/** Repinta los valores del overlay con los umbrales vigentes. */
+function renderSettingsValues() {
+  if (!el.settingsOverlay || el.settingsOverlay.hidden) return;
+  const set = (id, v, suf) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = `${v}${suf}`;
+  };
+  set('th-cpu-val', Math.round(THRESHOLDS.cpu), '%');
+  set('th-ram-val', Math.round(THRESHOLDS.ram), '%');
+  set('th-gpu-val', Math.round(THRESHOLDS.gpu), '%');
+  set('th-temp-val', Math.round(THRESHOLDS.temp), '°C');
+}
+
+function toggleSettings(show = el.settingsOverlay.hidden) {
+  el.settingsOverlay.hidden = !show;
+  el.btnSettings.classList.toggle('icon-btn--active', show);
+  if (show) renderSettingsValues();
+}
+
+// Clicks del overlay de Ajustes: cada botón ajusta ± y Rust persiste solo.
+el.settingsOverlay?.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-th]');
+  if (btn) {
+    const { th, step } = btn.dataset;
+    adjustThreshold(th, Number(step));
+    return;
+  }
+  if (e.target.closest('#settings-close')) toggleSettings(false);
+});
 
 async function setMode(mode, fromBackend = false) {
   if (mode === activeMode) return;
@@ -755,6 +809,7 @@ el.btnDev.addEventListener('click', () => setMode('dev'));
 el.btnCharts.addEventListener('click', () => setMode('charts'));
 el.btnProcs.addEventListener('click', () => setMode('procs'));
 el.btnRefreshProcs?.addEventListener('click', () => fetchProcesses(true));
+el.btnSettings?.addEventListener('click', () => toggleSettings());
 
 // Expandir desde el mini overlay (clic en CPU/RAM).
 el.miniCpu.addEventListener('click', () => setMode('dev'));
@@ -809,8 +864,27 @@ window.api.onModeChanged?.((mode) => {
   if (typeof mode === 'string' && mode !== activeMode) setMode(mode, true);
 });
 
+// Cambios directos por IPC (tests, atajos) o desde el binario nativo: el
+// guardián del renderer sigue los umbrales vigentes sin recargar.
+window.api.onThresholdsChanged?.((th) => {
+  if (th && typeof th === 'object') Object.assign(THRESHOLDS, th);
+  renderSettingsValues();
+});
+
 // Arranque.
 ensureModeBootstrap();
+
+// Preferencias persistidas: modo con el que se cerró y umbrales del guardián.
+// El backend ya restauró pin/posición; el modo lo aplica aquí el renderer.
+window.api.getSettings?.()
+  .then((res) => {
+    const st = res?.settings;
+    if (!st) return;
+    if (typeof st.thresholds === 'object' && st.thresholds) Object.assign(THRESHOLDS, st.thresholds);
+    if (typeof st.mode === 'string' && st.mode !== activeMode) setMode(st.mode);
+  })
+  .catch(() => {});
+
 startPolling();
 fetchProcesses(true);
 
