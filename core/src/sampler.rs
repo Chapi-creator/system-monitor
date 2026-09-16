@@ -140,7 +140,10 @@ mod job_object {
 #[cfg(windows)]
 use job_object::spawn_child_in_kill_on_close_job;
 
-const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// El renderer (pollTick) y el timer nativo consumen el snapshot cada 2500 ms:
+/// muestrear más rápido es trabajo que nadie lee. La matemática de B/s divide
+/// por `elapsed`, así que sigue exacta con cualquier cadencia.
+const STATS_INTERVAL: Duration = Duration::from_millis(2500);
 const PROC_INTERVAL: Duration = Duration::from_secs(10);
 /// Sondeo de estado mientras el gating tiene la enumeración de procesos en pausa
 /// (ventana oculta o modo sin lista): reanuda el muestreo en ≤2 s al volver.
@@ -186,7 +189,7 @@ fn spawn_stats(state: Arc<AppState>) {
         loop {
             // GATING por visibilidad: con el widget oculto en bandeja el renderer
             // está pausado (document.hidden) y NADIE consume el snapshot. Muestrear
-            // a 1 Hz en ese estado es trabajo 100% desperdiciado (y era el consumo
+            // cada 2.5 s en ese estado es trabajo 100% desperdiciado (y era el consumo
             // base dominante en oculto). Dormimos sin muestrear; al reaparecer, la
             // ventana `elapsed` grande produce una 1ª lectura válida al instante.
             if !state.visible.load(Ordering::SeqCst) {
@@ -690,6 +693,14 @@ mod tests {
         assert_eq!(s.mem_avg(), 0.0);
         assert_eq!(s.gpu_avg(), 0.0);
         assert_eq!(s.net_avg(), 0.0);
+    }
+
+    #[test]
+    fn stats_interval_iguala_cadencia_de_consumo() {
+        // pollTick (Tauri) y TIMER_METRICS (nativo) leen el snapshot cada
+        // 2500 ms: si alguien baja esta constante, vuelve el trabajo que
+        // nadie lee. Este test lo hace fallar a propósito.
+        assert_eq!(STATS_INTERVAL, Duration::from_millis(2500));
     }
 
     /// Integración real: los contadores de disco deben resolverse en ESTA
