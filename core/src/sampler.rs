@@ -185,6 +185,9 @@ fn spawn_stats(state: Arc<AppState>) {
         thread::sleep(Duration::from_millis(350));
 
         let mut prev_time = Instant::now();
+        // Interfaz de red cacheada (nombre + conteo de interfaces): evita el
+        // escaneo completo cada tick en estado estable (ver net_cache_valid).
+        let mut cached_iface: Option<(String, usize)> = None;
 
         loop {
             // GATING por visibilidad: con el widget oculto en bandeja el renderer
@@ -217,7 +220,27 @@ fn spawn_stats(state: Arc<AppState>) {
 
             // NetworkData::received()/transmitted() = bytes DESDE el último
             // refresh: dividir por el intervalo da B/s sin rastrear deltas.
-            let (iface, rx, tx) = pick_network(&networks, elapsed);
+            // Interfaz cacheada: el escaneo completo (minúsculas + 12 `contains`
+            // por interfaz) solo corre si cambió la topología o la cacheada
+            // desapareció; si no, se reutiliza el nombre y se leen solo sus
+            // contadores con la MISMA fórmula de B/s (cero cambio de valores).
+            let count = networks.list().len();
+            let cached_hit = cached_iface.as_ref().is_some_and(|(name, n)| {
+                *n == count && net_cache_valid(name, count, &networks)
+            });
+            let (iface, rx, tx) = if cached_hit {
+                let name = cached_iface.as_ref().map(|(n, _)| n.clone()).unwrap();
+                let (rx, tx) = networks
+                    .list()
+                    .get(name.as_str())
+                    .map(|d| (d.received() as f64 / elapsed, d.transmitted() as f64 / elapsed))
+                    .unwrap_or((0.0, 0.0));
+                (name, rx, tx)
+            } else {
+                let sel = pick_network(&networks, elapsed);
+                cached_iface = Some((sel.0.clone(), count));
+                sel
+            };
             let (temp_c, temp_status) = {
                 let t = state.temp.lock().unwrap();
                 (t.celsius, t.status.clone())
@@ -286,6 +309,13 @@ fn pick_network(networks: &Networks, elapsed: f64) -> (String, f64, f64) {
         }
     }
     best.or(fallback).unwrap_or_else(|| ("n/a".into(), 0.0, 0.0))
+}
+
+/// ¿Sigue válida la interfaz de red cacheada? Solo se invalida si desapareció
+/// del listado o si cambió la cantidad de interfaces (una VPN o WSL monta /
+/// desmonta adaptadores). En estado estable evita el escaneo completo cada tick.
+fn net_cache_valid(cached_name: &str, cached_count: usize, networks: &Networks) -> bool {
+    networks.list().len() == cached_count && networks.list().contains_key(cached_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +723,19 @@ mod tests {
         assert_eq!(s.mem_avg(), 0.0);
         assert_eq!(s.gpu_avg(), 0.0);
         assert_eq!(s.net_avg(), 0.0);
+    }
+
+    #[test]
+    fn net_cache_valid_acepta_cacheada_y_rechaza_cambios() {
+        let networks = Networks::new_with_refreshed_list();
+        let count = networks.list().len();
+        // Nombre inexistente: siempre inválido, haya interfaces o no.
+        assert!(!net_cache_valid("__interfaz_inexistente__", count, &networks));
+        if let Some(name) = networks.list().keys().next() {
+            assert!(net_cache_valid(name, count, &networks));
+            // Misma interfaz pero cambió la topología → re-escanear.
+            assert!(!net_cache_valid(name, count + 1, &networks));
+        }
     }
 
     #[test]
