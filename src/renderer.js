@@ -705,12 +705,25 @@ function buildProcessTooltip(p) {
 // ---------------------------------------------------------------------------
 let sessionStats = null;
 
+// Nodos de session-stats cacheados: 11 querySelector por tick → 0.
+// isConnected re-consulta si el DOM los reconstruyera (barato y a prueba
+// de paneles re-renderizados).
+const sessionNodeCache = {};
+function sessionNode(sel) {
+  let n = sessionNodeCache[sel];
+  if (!n || !n.isConnected) {
+    n = document.querySelector(sel);
+    sessionNodeCache[sel] = n;
+  }
+  return n;
+}
+
 async function fetchSessionStats() {
   try {
     const res = await window.api.getSessionStats();
     if (!res?.ok) return;
     sessionStats = res;
-    const q = (sel) => document.querySelector(sel);
+    const q = (sel) => sessionNode(sel);
     const set = (sel, v, suffix) => {
       const node = q(sel);
       if (node) node.textContent = v == null ? '--' : `${v}${suffix ?? ''}`;
@@ -732,9 +745,12 @@ async function fetchSessionStats() {
 // Loop de muestreo: UN solo intervalo de 2500 ms, trabajo filtrado por modo
 // ---------------------------------------------------------------------------
 let metricsTimer = null;
+let ticking = false; // Anti-solape: un tick lento no encadena otro encima.
 
 async function pollTick() {
   if (backendHidden || document.hidden) return; // Widget oculto en bandeja: cero trabajo.
+  if (ticking) return; // Tick anterior aún en vuelo: se salta, no se encadena.
+  ticking = true;
   try {
     const stats = await window.api.getSystemStats();
     if (!stats?.ok) return;
@@ -781,6 +797,8 @@ async function pollTick() {
     }
   } catch (error) {
     console.error('[renderer] polling error:', error);
+  } finally {
+    ticking = false; // Siempre se libera: el próximo intervalo vuelve a correr.
   }
 }
 
