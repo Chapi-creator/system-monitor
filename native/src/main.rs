@@ -72,7 +72,7 @@ struct Guardian {
     temp_fired: bool,
     gpu_fired: bool,
     ram_fired: bool,
-    last: [Instant; 4],
+    last: [Option<Instant>; 4],
 }
 
 /// Snapshot de los umbrales vigentes (configurables desde Ajustes).
@@ -90,8 +90,9 @@ fn thresholds_of(app: &AppState) -> Th {
 
 impl Default for Guardian {
     fn default() -> Self {
-        // Instant antiguo para que la 1ª notificación de cada tipo salga sin esperar.
-        let old = Instant::now() - Duration::from_secs(3600);
+        // `last` arranca en None (canal nunca notificado) → ready() es true y
+        // la 1ª alerta de cada tipo sale sin esperar. Sin aritmética de
+        // Instant: nada que paniquee en máquinas con poco uptime.
         Self {
             cpu_streak: 0,
             temp_streak: 0,
@@ -101,39 +102,73 @@ impl Default for Guardian {
             temp_fired: false,
             gpu_fired: false,
             ram_fired: false,
-            last: [old; 4],
+            last: [None; 4],
         }
     }
 }
 
-/// Índices del array `last`: 0=cpu, 1=temp, 2=gpu, 3=ram.
-impl Guardian {
-    fn check(&mut self, app: &Arc<AppState>, hwnd: HWND) {
-        let snap = app.snapshot.lock().unwrap();
-        let cpu = snap.cpu.clamp(0.0, 100.0);
-        let temp = snap.cpu_temp;
-        let gpu = snap.gpu;
-        let ram = snap.memory.percent.clamp(0.0, 100.0);
-        let used_gb = snap.memory.used_gb;
-        let total_gb = snap.memory.total_gb;
-        drop(snap);
-        // Umbrales CONFIGURABLES: se leen de settings en cada tick (un Mutex
-        // lock trivial) para que un cambio en Ajustes aplique al instante.
-        let th = thresholds_of(app);
+/// Snapshot plano de métricas+umbrales que consume `Guardian::evaluate`.
+/// Desacopla la lógica de decisión del estado Win32/AppState: en tests se
+/// construye a mano, sin Mutex ni ventana.
+struct GuardianInput {
+    cpu: f64,
+    temp: f64,
+    gpu: f64,
+    ram: f64,
+    used_gb: f64,
+    total_gb: f64,
+    th_cpu: f64,
+    th_temp: f64,
+    th_gpu: f64,
+    th_ram: f64,
+}
 
+/// Índices del array `last` (Some = instante del último disparo): 0=cpu,
+/// 1=temp, 2=gpu, 3=ram.
+impl Guardian {
+    /// Tick del guardián: lee métricas/umbrales del estado compartido y delega
+    /// la decisión en `evaluate` (la parte pura y testeable). `hwnd` es None
+    /// en tests; con Some dispara el globo de la bandeja.
+    fn check(&mut self, app: &Arc<AppState>, hwnd: Option<HWND>) {
+        let snap = app.snapshot.lock().unwrap();
+        let th = thresholds_of(app);
+        let m = GuardianInput {
+            cpu: snap.cpu.clamp(0.0, 100.0),
+            temp: snap.cpu_temp,
+            gpu: snap.gpu,
+            ram: snap.memory.percent.clamp(0.0, 100.0),
+            used_gb: snap.memory.used_gb,
+            total_gb: snap.memory.total_gb,
+            th_cpu: th.cpu,
+            th_temp: th.temp,
+            th_gpu: th.gpu,
+            th_ram: th.ram,
+        };
+        drop(snap);
+        self.evaluate(&m, &mut |title, body| {
+            if let Some(h) = hwnd {
+                unsafe { tray_balloon(h, title, body) }
+            }
+        });
+    }
+
+    /// Lógica PURA del guardián (testeable sin ventana ni Win32). Reglas por
+    /// canal (cpu/temp/gpu/ram):
+    ///  - Sentinela negativa (temp/gpu = -1: sin datos) → nunca alerta.
+    ///  - Sobre el umbral → streak +1; al llegar a STREAK_NEEDED, sin latch
+    ///    activo y con cooldown vencido → dispara UNA vez y marca el instante.
+    ///  - Bajo el umbral → streak y latch se resetean (episodio terminado).
+    fn evaluate(&mut self, m: &GuardianInput, notify: &mut dyn FnMut(&str, &str)) {
         // CPU
-        if cpu > th.cpu {
+        if m.cpu > m.th_cpu {
             self.cpu_streak += 1;
             if self.cpu_streak >= STREAK_NEEDED && !self.cpu_fired && self.ready(0) {
                 self.cpu_fired = true;
                 self.mark(0);
-                unsafe {
-                    tray_balloon(
-                        hwnd,
-                        "\u{26A0}\u{FE0F} CPU Alert",
-                        &format!("CPU {:.1}% sostenida sobre {}%", cpu, th.cpu),
-                    );
-                }
+                notify(
+                    "\u{26A0}\u{FE0F} CPU Alert",
+                    &format!("CPU {:.1}% sostenida sobre {}%", m.cpu, m.th_cpu),
+                );
             }
         } else {
             self.cpu_streak = 0;
@@ -141,18 +176,15 @@ impl Guardian {
         }
 
         // TEMP (-1 = sin sensor: nunca alerta).
-        if temp > 0.0 && temp >= th.temp {
+        if m.temp > 0.0 && m.temp >= m.th_temp {
             self.temp_streak += 1;
             if self.temp_streak >= STREAK_NEEDED && !self.temp_fired && self.ready(1) {
                 self.temp_fired = true;
                 self.mark(1);
-                unsafe {
-                    tray_balloon(
-                        hwnd,
-                        "\u{1F321}\u{FE0F} Thermal Alert",
-                        &format!("CPU {}°C sostenida sobre {}°C", temp as u32, th.temp),
-                    );
-                }
+                notify(
+                    "\u{1F321}\u{FE0F} Thermal Alert",
+                    &format!("CPU {}°C sostenida sobre {}°C", m.temp as u32, m.th_temp),
+                );
             }
         } else {
             self.temp_streak = 0;
@@ -160,18 +192,15 @@ impl Guardian {
         }
 
         // GPU (-1 = contadores aún no disponibles: nunca alerta).
-        if gpu > 0.0 && gpu >= th.gpu {
+        if m.gpu > 0.0 && m.gpu >= m.th_gpu {
             self.gpu_streak += 1;
             if self.gpu_streak >= STREAK_NEEDED && !self.gpu_fired && self.ready(2) {
                 self.gpu_fired = true;
                 self.mark(2);
-                unsafe {
-                    tray_balloon(
-                        hwnd,
-                        "\u{1F3AE} GPU Alert",
-                        &format!("GPU {:.1}% sostenida sobre {}%", gpu, th.gpu),
-                    );
-                }
+                notify(
+                    "\u{1F3AE} GPU Alert",
+                    &format!("GPU {:.1}% sostenida sobre {}%", m.gpu, m.th_gpu),
+                );
             }
         } else {
             self.gpu_streak = 0;
@@ -179,21 +208,18 @@ impl Guardian {
         }
 
         // RAM
-        if ram >= th.ram {
+        if m.ram >= m.th_ram {
             self.ram_streak += 1;
             if self.ram_streak >= STREAK_NEEDED && !self.ram_fired && self.ready(3) {
                 self.ram_fired = true;
                 self.mark(3);
-                unsafe {
-                    tray_balloon(
-                        hwnd,
-                        "\u{1F9E0} RAM Alert",
-                        &format!(
-                            "Memoria {:.1}% sostenida sobre {}% ({:.1}/{:.1} GB)",
-                            ram, th.ram, used_gb, total_gb
-                        ),
-                    );
-                }
+                notify(
+                    "\u{1F9E0} RAM Alert",
+                    &format!(
+                        "Memoria {:.1}% sostenida sobre {}% ({:.1}/{:.1} GB)",
+                        m.ram, m.th_ram, m.used_gb, m.total_gb
+                    ),
+                );
             }
         } else {
             self.ram_streak = 0;
@@ -202,10 +228,11 @@ impl Guardian {
     }
 
     fn ready(&self, i: usize) -> bool {
-        self.last[i].elapsed() >= COOLDOWN
+        // None = canal sin disparar nunca → cooldown vencido.
+        self.last[i].map_or(true, |t| t.elapsed() >= COOLDOWN)
     }
     fn mark(&mut self, i: usize) {
-        self.last[i] = Instant::now();
+        self.last[i] = Some(Instant::now());
     }
 }
 
@@ -465,7 +492,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             TIMER_METRICS => {
                 if app.state.visible.load(Ordering::SeqCst) {
                     app.push_metrics();
-                    app.guardian.check(&app.state, hwnd);
+                    app.guardian.check(&app.state, Some(hwnd));
                     InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
@@ -777,7 +804,12 @@ fn main() -> windows::core::Result<()> {
 
         // Temporizadores + hotkey + bandeja.
         SetTimer(Some(hwnd), TIMER_METRICS, METRICS_MS, None);
-        RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0), VK_M.0 as u32)?;
+        // El hotkey global es un extra, no algo vital: si otro proceso ya lo
+        // registró (p. ej. la variante Tauri en la misma sesión), la app debe
+        // arrancar igual y sin él. Antes el `?` mataba todo el proceso aquí.
+        if RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0), VK_M.0 as u32).is_err() {
+            eprintln!("sysmon-native: Ctrl+Shift+M ocupado por otro proceso; continuando sin hotkey");
+        }
         tray_add(hwnd);
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -785,9 +817,207 @@ fn main() -> windows::core::Result<()> {
         // Bucle de mensajes.
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg); 
             DispatchMessageW(&msg);
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests del guardián: la decisión vive en `evaluate` (pura), así que streaks,
+// latch y cooldown se prueban sin ventana ni estado Win32.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod guardian_tests {
+    use super::*;
+
+    /// Snapshot de prueba: umbral CPU configurable, resto alto/quieto.
+    fn input(cpu: f64) -> GuardianInput {
+        GuardianInput {
+            cpu,
+            temp: -1.0,   // sin sensor: canal TEMP mudo
+            gpu: -1.0,    // sin contadores: canal GPU mudo
+            ram: 40.0,
+            used_gb: 8.0,
+            total_gb: 16.0,
+            th_cpu: 85.0,
+            th_temp: 80.0,
+            th_gpu: 90.0,
+            th_ram: 90.0,
+        }
+    }
+
+    fn tick(g: &mut Guardian, m: &GuardianInput) -> Vec<String> {
+        let mut fired: Vec<String> = Vec::new();
+        g.evaluate(m, &mut |title, _body| fired.push(title.to_string()));
+        fired
+    }
+
+    #[test]
+    fn no_dispara_si_nunca_supera_el_umbral() {
+        let mut g = Guardian::default();
+        for _ in 0..10 {
+            assert!(tick(&mut g, &input(84.9)).is_empty());
+        }
+    }
+
+    #[test]
+    fn umbral_es_estricto_cpu_mayor_no_mayor_igual() {
+        let mut g = Guardian::default();
+        // CPU == umbral NO cuenta (la comparación es >).
+        assert!(tick(&mut g, &input(85.0)).is_empty());
+        assert!(tick(&mut g, &input(85.0)).is_empty());
+        // 85.1 ya supera: primer tick del streak.
+        assert!(tick(&mut g, &input(85.1)).is_empty());
+        assert_eq!(tick(&mut g, &input(85.1)).len(), 1);
+    }
+
+    #[test]
+    fn streak_necesita_2_ticks_consecutivos() {
+        let mut g = Guardian::default();
+        // Un tick aislado sobre umbral → nada (anti-falsas alarmas).
+        assert!(tick(&mut g, &input(99.0)).is_empty());
+        // Baja un tick → streak reseteado.
+        assert!(tick(&mut g, &input(50.0)).is_empty());
+        // Vuelve a subir: el streak empieza de cero.
+        assert!(tick(&mut g, &input(99.0)).is_empty());
+        assert_eq!(tick(&mut g, &input(99.0)).len(), 1);
+    }
+
+    #[test]
+    fn latch_dispara_una_sola_vez_por_episodio() {
+        let mut g = Guardian::default();
+        assert!(tick(&mut g, &input(99.0)).is_empty());
+        let first = tick(&mut g, &input(99.0));
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("CPU"));
+        // Sigue alto: sin más alertas (latch activo).
+        for _ in 0..20 {
+            assert!(tick(&mut g, &input(99.0)).is_empty());
+        }
+    }
+
+    #[test]
+    fn cooldown_permite_renotificar_tras_episodio_separado() {
+        let mut g = Guardian::default();
+        // Episodio 1: dispara en el 2º tick y se apaga.
+        tick(&mut g, &input(99.0));
+        tick(&mut g, &input(99.0));
+        // Baja → resetea streak y latch.
+        for _ in 0..5 {
+            tick(&mut g, &input(30.0));
+        }
+        // Episodio 2 inmediato: cooldown de 60 s NO vencido → no dispara.
+        tick(&mut g, &input(99.0));
+        assert!(tick(&mut g, &input(99.0)).is_empty());
+        // Otra caída/subida tampoco dispara hasta vencer el cooldown.
+        tick(&mut g, &input(30.0));
+        tick(&mut g, &input(99.0));
+        tick(&mut g, &input(99.0));
+        assert!(tick(&mut g, &input(99.0)).is_empty());
+        // La única vía de renotificación: baja, espera el cooldown y repite.
+        tick(&mut g, &input(30.0));
+        g.last[0] = Some(Instant::now() - COOLDOWN - Duration::from_secs(1));
+        tick(&mut g, &input(99.0));
+        assert_eq!(tick(&mut g, &input(99.0)).len(), 1);
+    }
+
+    #[test]
+    fn cooldown_vencido_renotifica_en_nuevo_episodio() {
+        let mut g = Guardian::default();
+        tick(&mut g, &input(99.0));
+        tick(&mut g, &input(99.0));
+        tick(&mut g, &input(30.0)); // fin del episodio → latch OFF
+        // Simula que pasó el cooldown sin dormir 60 s en el test.
+        g.last[0] = Some(Instant::now() - COOLDOWN - Duration::from_secs(1));
+        tick(&mut g, &input(99.0));
+        let fired = tick(&mut g, &input(99.0));
+        assert_eq!(fired.len(), 1);
+        assert!(fired[0].contains("CPU"));
+    }
+
+    #[test]
+    fn sentinela_negativo_no_alerta_nunca_temp_y_gpu() {
+        let mut g = Guardian::default();
+        // temp = -1 (sin sensor) y gpu = -1 (sin contadores): jamás alertan,
+        // ni siquiera "superando" umbrales negativos.
+        let mut m = input(30.0);
+        m.temp = -1.0;
+        m.gpu = -1.0;
+        m.th_temp = -10.0;
+        m.th_gpu = -10.0;
+        for _ in 0..10 {
+            assert!(tick(&mut g, &m).is_empty());
+        }
+    }
+
+    #[test]
+    fn temp_y_gpu_disparan_con_datos_validos() {
+        let mut g = Guardian::default();
+        let mut m = input(30.0);
+        m.temp = 95.0;
+        m.gpu = 95.0;
+        // TEMP y GPU usan >= (incluye el umbral), al contrario que CPU.
+        assert!(tick(&mut g, &m).is_empty()); // streak 1 (temp y gpu)
+        let fired = tick(&mut g, &m);
+        assert_eq!(fired.len(), 2);
+        assert!(fired.iter().any(|t| t.contains("Thermal")));
+        assert!(fired.iter().any(|t| t.contains("GPU")));
+    }
+
+    #[test]
+    fn cpu_y_ram_son_canales_independientes() {
+        let mut g = Guardian::default();
+        let mut m = input(99.0);
+        m.ram = 95.0; // ambos sobre umbral (ram >= 90)
+        assert!(tick(&mut g, &m).is_empty());
+        let fired = tick(&mut g, &m);
+        assert_eq!(fired.len(), 2);
+        assert!(fired.iter().any(|t| t.contains("CPU")));
+        assert!(fired.iter().any(|t| t.contains("RAM")));
+        // El latch es por canal: bajamos solo CPU → solo RAM sigue en latch.
+        let mut m2 = input(30.0);
+        m2.ram = 95.0;
+        for _ in 0..5 {
+            assert!(tick(&mut g, &m2).is_empty());
+        }
+    }
+
+    #[test]
+    fn ram_umbral_incluyente_y_mensaje_con_gigas() {
+        let mut g = Guardian::default();
+        let mut m = input(30.0);
+        m.ram = 90.0; // == umbral: RAM SÍ cuenta (>=)
+        assert!(tick(&mut g, &m).is_empty());
+        let mut bodies: Vec<String> = Vec::new();
+        // Segundo tick capturando también el cuerpo del globo.
+        g.evaluate(&m, &mut |_t, b| bodies.push(b.to_string()));
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("8.0/16.0 GB"));
+    }
+
+    #[test]
+    fn thresholds_of_lee_los_umbrales_configurables() {
+        let app = AppState::default();
+        let th = thresholds_of(&app);
+        assert_eq!(th.cpu, 85.0);
+        assert_eq!(th.ram, 90.0);
+        assert_eq!(th.gpu, 90.0);
+        assert_eq!(th.temp, 80.0);
+        // Cambio en vivo vía settings (lo que hace la pestaña de Ajustes).
+        app.settings.lock().unwrap().thresholds.set("cpu", 70.0);
+        assert_eq!(thresholds_of(&app).cpu, 70.0);
+    }
+
+    #[test]
+    fn default_arranca_con_latch_apagado_y_cooldown_vencido() {
+        let g = Guardian::default();
+        assert!(!g.cpu_fired && !g.temp_fired && !g.gpu_fired && !g.ram_fired);
+        assert_eq!(g.cpu_streak, 0);
+        // last en None → ready() true desde el primer momento.
+        for i in 0..4 {
+            assert!(g.ready(i), "canal {i} debería estar listo al arrancar");
+        }
     }
 }

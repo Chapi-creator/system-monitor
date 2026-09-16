@@ -132,7 +132,7 @@ async function main() {
   check('app viva antes de close', beforePid === 'alive');
   await evalJs(`window.close()`);
   await sleep(1500);
-  const stillRunning = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.0.0' -ErrorAction SilentlyContinue).Count"`);
+  const stillRunning = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.1.0' -ErrorAction SilentlyContinue).Count"`);
   check('window.close() → proceso sigue vivo (va a bandeja)', stillRunning === '1', `procesos=${stillRunning}`);
   // document.hidden NO refleja el ocultado del host en WebView2: la verdad
   // está a nivel OS (IsWindowVisible sobre la clase 'Tauri Window').
@@ -163,10 +163,10 @@ async function main() {
   check('killProcess PID inválido rechazado', killInvalid?.ok === false, JSON.stringify(killInvalid));
 
   console.log('\n=== 9. Instancia única ===');
-  const beforeInstances = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.0.0' -ErrorAction SilentlyContinue).Count"`);
-  const second = spawn('"./dist/System Monitor Widget-Tauri-Portable-1.0.0.exe"', [], { shell: true, windowsHide: true, stdio: 'ignore' });
+  const beforeInstances = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.1.0' -ErrorAction SilentlyContinue).Count"`);
+  const second = spawn('"./dist/System Monitor Widget-Tauri-Portable-1.1.0.exe"', [], { shell: true, windowsHide: true, stdio: 'ignore' });
   await sleep(4000);
-  const afterInstances = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.0.0' -ErrorAction SilentlyContinue).Count"`);
+  const afterInstances = ps(`powershell -NoProfile -Command "(Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.1.0' -ErrorAction SilentlyContinue).Count"`);
   check('segundo lanzamiento no duplica proceso', afterInstances === '1', `antes=${beforeInstances} después=${afterInstances}`);
   try { second.kill(); } catch { /* ya salió solo */ }
 

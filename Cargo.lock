@@ -3512,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "is_elevated",
  "serde",
@@ -3524,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon-native"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "is_elevated",
  "sysinfo",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "system-monitor-widget"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "sysmon-core",

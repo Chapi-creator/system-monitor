@@ -67,7 +67,7 @@ npm run tauri:build
 
 # 2. Launch the app with CDP enabled
 cd dist
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" "./System Monitor Widget-Tauri-Portable-1.0.0.exe" &
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" "./System Monitor Widget-Tauri-Portable-1.1.0.exe" &
 
 # 3. Run the suites
 cd ..
@@ -78,7 +78,7 @@ node e2e-mode-event.js    # onModeChanged delivery (8 checks)
 Notes:
 - WebView2 receives the debug port through the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` env var — no code changes needed.
 - The E2E suite probes real OS window visibility with `IsWindowVisible` (`win-visibility.ps1`) because WebView2 does not propagate `document.hidden` when the host window hides.
-- Close the test instance afterwards (`Get-Process 'System Monitor Widget-Tauri-Portable-1.0.0' | Stop-Process`) so it doesn't fight the single-instance lock with your daily session.
+- Close the test instance afterwards (`Get-Process 'System Monitor Widget-Tauri-Portable-1.1.0' | Stop-Process`) so it doesn't fight the single-instance lock with your daily session.
 
 ### PowerShell utilities
 

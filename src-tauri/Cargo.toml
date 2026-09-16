@@ -1,6 +1,6 @@
 [package]
 name = "system-monitor-widget"
-version = "1.0.0"
+version = "1.1.0"
 description = "Widget flotante de monitoreo del sistema (CPU / RAM / GPU / Red / Temp)"
 authors = ["Breiner"]
 license = "MIT"
@@ -29,10 +29,3 @@ serde_json = "1"
 [dev-dependencies]
 # tauri::test (mock_app / MockRuntime) para probar comandos y eventos sin GUI.
 tauri = { version = "2", features = ["test"] }
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
-panic = "abort"
