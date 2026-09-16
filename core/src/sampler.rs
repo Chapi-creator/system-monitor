@@ -4,7 +4,8 @@
 //!    (total − available), red diferencial por interfaz activa → 1 s.
 //!  - procs: top-5 por CPU → 10 s.
 //!  - gpu:   typeperf PERSISTENTE (contadores PDH por motor) → cada 2 s.
-//!  - temp:  WMI MSAcpi_ThermalZoneTemperature → cada 60 s, con estado
+//!  - temp:  WMI MSAcpi_ThermalZoneTemperature (namespace ROOT\WMI) → cada
+//!    60 s, con estado
 //!    honesto de 3 niveles ('ok' | 'admin' | 'none').
 //!  - disk:  typeperf PERSISTENTE (PhysicalDisk Read/Write Bytes/sec) → 2 s.
 //!  - gpu_info: metadatos de GPU vía WMI Win32_VideoController (TTL 10 min).
@@ -561,8 +562,12 @@ fn spawn_temp(state: Arc<AppState>) {
 /// expone zonas o el valor está fuera del rango físico plausible (0-120 °C).
 fn read_acpi_temp() -> Option<f64> {
     // wmi 0.17 exige inicializar COM explícitamente (COMLibrary) por hilo.
+    // OJO: la clase vive en ROOT\WMI, NO en el default ROOT\CIMV2. Con el
+    // namespace por defecto la conexión tiene éxito pero la clase no existe →
+    // lista vacía → equipos CON sensor mostraban "Sin sensor" incluso como
+    // admin. ROOT\WMI es lo que usaba la variante Electron.
     let com = COMLibrary::new().ok()?;
-    let conn = wmi::WMIConnection::new(com).ok()?;
+    let conn = wmi::WMIConnection::with_namespace_path("ROOT\\WMI", com).ok()?;
     let zones: Vec<ThermalZone> = conn.query().ok()?;
     let kelvin_x10 = zones.first()?.current_temperature;
     let celsius = kelvin_x10 as f64 / 10.0 - 273.15;

@@ -1,4 +1,4 @@
-param([string]$ProcName = 'System Monitor Widget-Tauri-Portable-1.0.0')
+param([string]$ProcName = 'System Monitor Widget-Tauri-Portable-1.1.0')
 $p = Get-Process -Name $ProcName -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $p) { Write-Output 'NO_PROCESS'; exit }
 $targetPid = $p.Id

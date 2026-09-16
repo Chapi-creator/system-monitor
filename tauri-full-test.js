@@ -172,7 +172,9 @@ async function main() {
 
   console.log('\n=== 10. Alertas: notificación única, sin banner ===');
   await evalJs(`(() => {
-    if (window.__tSpy) return;
+    // Re-ejecutar la suite contra la MISMA instancia viva no debe heredar
+    // toasts de corridas anteriores: se reinician los contadores.
+    if (window.__tSpy) { window.__tSpy.toasts.length = 0; window.__tSpy.bannerSeen = false; return; }
     const Orig = window.Notification;
     window.__tSpy = { toasts: [], bannerSeen: false };
     window.Notification = class Spy extends Orig {
