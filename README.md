@@ -67,7 +67,7 @@ npm run tauri:build
 
 # 2. Launch the app with CDP enabled
 cd dist
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" "./System Monitor Widget-Tauri-Portable-1.1.0.exe" &
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" "./System Monitor Widget-Tauri-Portable-1.1.0.exe" &  # desde dist/
 
 # 3. Run the suites
 cd ..
