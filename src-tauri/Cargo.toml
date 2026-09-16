@@ -1,6 +1,6 @@
 [package]
 name = "system-monitor-widget"
-version = "1.1.0"
+version = "1.1.1"
 description = "Widget flotante de monitoreo del sistema (CPU / RAM / GPU / Red / Temp)"
 authors = ["Breiner"]
 license = "MIT"

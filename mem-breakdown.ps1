@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'SilentlyContinue'
-$root = Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.1.0' | Select-Object -First 1
+$root = Get-Process -Name 'System Monitor Widget-Tauri-Portable-1.1.1' | Select-Object -First 1
 if (-not $root) { Write-Output 'NO PROCESS'; exit 1 }
 
 function Info($proc, $label) {

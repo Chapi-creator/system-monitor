@@ -1,6 +1,6 @@
 [package]
 name = "sysmon-native"
-version = "1.1.0"
+version = "1.1.1"
 description = "Widget de monitoreo del sistema con UI 100% nativa Win32+Direct2D (sin WebView)"
 authors = ["Breiner"]
 license = "MIT"
