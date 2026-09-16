@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <!-- connect-src ipc: http://ipc.localhost es el canal de invoke() de Tauri. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost;" />
+  <!-- La misma política vive a nivel config en tauri.conf.json (security.csp): -->
+  <!-- si se quita este meta, Tauri la inyecta igual. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; frame-ancestors 'none';" />
   <title>System Monitor</title>
   <link rel="stylesheet" href="styles.css" />
 </head>

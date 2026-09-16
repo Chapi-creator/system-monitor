@@ -710,6 +710,18 @@ fn main() -> windows::core::Result<()> {
         let hinstance = GetModuleHandleW(None)?;
         let class_name = w!("SysMonNativeWidget");
 
+        // Instancia única (regresión de la migración: Electron tenía lock):
+        // si ya existe una ventana de esta clase, se trae al frente y esta
+        // segunda ejecución se despacha. FindWindowW sobre el class name
+        // registrado alcanza porque es idéntico en cada corrida.
+        if let Ok(prev) = FindWindowW(class_name, None) {
+            if !prev.0.is_null() {
+                let _ = ShowWindow(prev, SW_RESTORE);
+                let _ = SetForegroundWindow(prev);
+                return Ok(());
+            }
+        }
+
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),

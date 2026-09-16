@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Runtime, State, WindowEvent};
-use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 // ---------------------------------------------------------------------------
 // Fuente de verdad de la visibilidad: actualiza el flag que leen los gating
@@ -297,8 +297,6 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts(["Ctrl+Shift+M"])
-                .expect("shortcut inválido")
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         toggle_widget(app);
@@ -324,6 +322,17 @@ fn main() {
             *state.settings.lock().unwrap() = loaded;
 
             sampler::spawn_all(state);
+
+            // Hotkey global Ctrl+Shift+M: si otro proceso lo mantiene ocupado,
+            // se tolera y el widget sigue andando igual (sin atajo); se avisa
+            // en consola. El registro se hace acá — post setup — para no
+            // propagar el error como fallo de arranque del plugin.
+            if let Err(e) = app
+                .global_shortcut()
+                .register_multiple(["Ctrl+Shift+M"])
+            {
+                eprintln!("sysmon-widget: Ctrl+Shift+M ocupado ({e}); widget activo sin hotkey global");
+            }
 
             build_tray(app)?;
             Ok(())
