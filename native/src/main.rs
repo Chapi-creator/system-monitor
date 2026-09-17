@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, ScreenToClient, GetDeviceCaps, PAINTSTRUCT,
@@ -251,12 +251,97 @@ struct App {
 }
 
 /// Icono propio embebido: el mismo .ico de la variante Tauri. Los bytes viajan
-/// dentro del exe (sin archivos sueltos ni dependencias nuevas) y se decodifican
-/// con la API del sistema. Antes: IDI_APPLICATION genérico (el "sin logo").
+/// dentro del exe (sin archivos sueltos ni dependencias nuevas).
 const APP_ICON_ICO: &[u8] = include_bytes!("../../src-tauri/icons/icon.ico");
 
+/// Extrae del .ico la mejor imagen para CreateIconFromResourceEx, que espera
+/// UNA imagen sin el header ICONDIR del archivo: pasarle el .ico crudo falla
+/// en silencio y deja icono nulo (bandeja/taskbar genéricos).
+/// Orden: BMP 32bpp más grande primero (soporte garantizado); si el .ico solo
+/// trae PNG comprimido (como el nuestro: hasta la de 16px viene en PNG),
+/// la PNG más grande (Vista+ la decodifica vía LoadImageW). Si el parse
+/// falla, None.
+/// Nota: en ICONDIR, lado 0 == 256 px.
+/// Devuelve (primeros 8 bytes de la entry, slice de la imagen).
+fn find_best_icon_image() -> Option<([u8; 8], &'static [u8])> {
+    let data = APP_ICON_ICO;
+    if data.len() < 6 || u16::from_le_bytes([data[0], data[1]]) != 0 {
+        return None;
+    }
+    let count = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let mut best_bmp: Option<(u32, [u8; 8], &[u8])> = None;
+    let mut best_png: Option<(u32, [u8; 8], &[u8])> = None;
+    for i in 0..count {
+        let o = 6 + i * 16;
+        if data.len() < o + 16 {
+            break;
+        }
+        let side = |b: u8| if b == 0 { 256 } else { b as u32 };
+        let side = side(data[o]).max(side(data[o + 1]));
+        let bits = u16::from_le_bytes([data[o + 6], data[o + 7]]);
+        let bytes =
+            u32::from_le_bytes([data[o + 8], data[o + 9], data[o + 10], data[o + 11]]) as usize;
+        let off =
+            u32::from_le_bytes([data[o + 12], data[o + 13], data[o + 14], data[o + 15]]) as usize;
+        if bits != 32 || bytes < 64 || off == 0 || off + bytes > data.len() {
+            continue;
+        }
+        let is_png =
+            data[off] == 0x89 && data[off + 1] == 0x50 && data[off + 2] == 0x4E && data[off + 3] == 0x47;
+        let mut entry = [0u8; 8];
+        entry.copy_from_slice(&data[o..o + 8]);
+        let slot = if is_png { &mut best_png } else { &mut best_bmp };
+        if slot.map(|(bp, _, _)| side > bp).unwrap_or(true) {
+            *slot = Some((side, entry, &data[off..off + bytes]));
+        }
+    }
+    best_bmp.or(best_png).map(|(_, e, s)| (e, s))
+}
+
+/// Arma un .ico mínimo de UNA imagen (header ICONDIR + entry + datos):
+/// es lo que LoadImageW sabe leer desde disco (incluido PNG).
+fn single_icon_ico(entry8: &[u8; 8], img: &[u8]) -> Vec<u8> {
+    let mut ico = Vec::with_capacity(22 + img.len());
+    ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved, type=1, count=1
+    ico.extend_from_slice(&entry8[0..8]); // w,h,cc,reserved,planes,bitcount
+    ico.extend_from_slice(&(img.len() as u32).to_le_bytes());
+    ico.extend_from_slice(&22u32.to_le_bytes()); // offset de la imagen
+    ico.extend_from_slice(img);
+    ico
+}
+
+/// Carga el icono vía archivo temporal (para PNG: LoadImageW sí lo
+/// decodifica). Cache: si el temp ya mide lo esperado, se reutiliza.
+unsafe fn load_icon_via_temp_file(entry8: &[u8; 8], img: &[u8]) -> windows::core::Result<HICON> {
+    let mut path = std::env::temp_dir();
+    path.push("sysmon-widget-icon.ico");
+    let want = 22 + img.len();
+    let fresh = std::fs::metadata(&path).map(|m| m.len() as usize == want).unwrap_or(false);
+    if !fresh {
+        std::fs::write(&path, single_icon_ico(entry8, img))
+            .map_err(|_| windows::core::Error::from_win32())?;
+    }
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = LoadImageW(None, PCWSTR(wide.as_ptr()), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)?;
+    Ok(HICON(h.0))
+}
+
 unsafe fn load_app_icon() -> windows::core::Result<HICON> {
-    CreateIconFromResourceEx(APP_ICON_ICO, true, 0x00030000, 0, 0, LR_DEFAULTCOLOR)
+    if let Some((entry, img)) = find_best_icon_image() {
+        // Vía directa (vale para BMP; en PNG falla y se sigue abajo).
+        if let Ok(h) = CreateIconFromResourceEx(img, true, 0x00030000, 0, 0, LR_DEFAULTCOLOR) {
+            return Ok(h);
+        }
+        // Vía .ico temporal (vale para PNG).
+        if let Ok(h) = load_icon_via_temp_file(&entry, img) {
+            return Ok(h);
+        }
+    }
+    LoadIconW(None, IDI_APPLICATION)
 }
 
 impl App {
@@ -1075,6 +1160,55 @@ mod guardian_tests {
     /// Regression del hit-test hacia adelante (el comentario decía "reversa"
     /// pero el código hacía find() directo: un clic en un stepper podía
     /// caer en el KILL de la fila de abajo).
+    /// El .ico embebido debe resolver a una imagen válida (no el archivo
+    /// crudo con header ICONDIR, que CreateIconFromResourceEx rechaza en
+    /// silencio dejando icono nulo). Acepta BMP (BITMAPINFOHEADER = 40)
+    /// o PNG (magic 89 50 4E 47, lo que trae nuestro icon.ico).
+    #[test]
+    fn icono_embebido_resuelve_imagen_valida() {
+        let (_, img) =
+            find_best_icon_image().expect("icon.ico debe aportar una imagen utilizable");
+        let is_bmp = u32::from_le_bytes([img[0], img[1], img[2], img[3]]) == 40;
+        let is_png = img[0] == 0x89 && img[1] == 0x50 && img[2] == 0x4E && img[3] == 0x47;
+        assert!(is_bmp || is_png);
+        assert!(img.len() > 500);
+    }
+
+    /// Carga punta a punta sin ventana: el pipeline completo (BMP directo,
+    /// .ico temporal + LoadImageW, genérico) debe devolver un handle válido.
+    /// Es el guard durable del logo: WM_GETICON en vivo depende además de que
+    /// no haya otra instancia con el lock (el harness laurea falsos nulos).
+    #[test]
+    fn load_app_icon_devuelve_handle_valido() {
+        let h = unsafe { load_app_icon().expect("debe cargar algún icono") };
+        assert!(!h.0.is_null());
+    }
+
+    /// La vía temporal carga el PNG del .ico (el caso real de nuestro
+    /// icon.ico, 100% PNG): distingue éxito propio del fallback genérico.
+    #[test]
+    fn temp_file_carga_png_del_ico() {
+        let (entry, img) =
+            find_best_icon_image().expect("icon.ico debe aportar una imagen utilizable");
+        let h = unsafe { load_icon_via_temp_file(&entry, img).expect("LoadImageW debe tragar el PNG") };
+        assert!(!h.0.is_null());
+    }
+
+    /// El .ico mínimo de una imagen respeta el layout que LoadImageW espera:
+    /// ICONDIR(6) + entry(16, offset=22) + datos intactos.
+    #[test]
+    fn single_icon_ico_layout_valido() {
+        let entry = [32u8, 32, 0, 0, 1, 0, 32, 0];
+        let img = vec![0x89u8, 0x50, 0x4E, 0x47, 0xAA, 0xBB];
+        let ico = single_icon_ico(&entry, &img);
+        assert_eq!(ico.len(), 22 + img.len());
+        assert_eq!(&ico[0..6], &[0, 0, 1, 0, 1, 0]);
+        assert_eq!(&ico[6..14], &entry);
+        assert_eq!(u32::from_le_bytes([ico[14], ico[15], ico[16], ico[17]]), 6);
+        assert_eq!(u32::from_le_bytes([ico[18], ico[19], ico[20], ico[21]]), 22);
+        assert_eq!(&ico[22..], &img[..]);
+    }
+
     #[test]
     fn hit_prioriza_ultimo_dibujado_sobre_solape() {
         let mut uist = ui::UiState::default();
