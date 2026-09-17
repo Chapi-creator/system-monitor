@@ -2,8 +2,10 @@
 
 Floating minimalist desktop widget for real-time system monitoring in the corner of your screen: **CPU, RAM, Network, CPU temperature and GPU usage**. Two variants share the same core:
 
-- **Tauri v2** (Rust backend + WebView2 UI) — the original, feature-complete variant.
-- **Nativo** (`native/`, Win32 + Direct2D, **sin WebView**) — un solo proceso, misma lógica y diseño, ~60 MB de árbol vs ~350-400 MB del WebView. El muestreo, el estado y los formateadores viven en el crate compartido `core/` (sysmon-core): cero lógica duplicada entre ambas variantes.
+- **Nativo** (`native/`, Win32 + Direct2D, **sin WebView**) — la variante recomendada si te importa el consumo: un solo proceso, misma lógica y diseño, **~75 MB y ~0.1% CPU idle medidos** (exe de 0.5 MB, sin dependencias).
+- **Tauri v2** (Rust backend + WebView2 UI) — la variante original, con la misma funcionalidad (~381 MB / ~0.25% idle, casi todo WebView2).
+
+El muestreo, el estado y los formateadores viven en el crate compartido `core/` (sysmon-core): cero lógica duplicada entre ambas variantes.
 
 ![License](https://img.shields.io/npm/l/system-monitor-widget)
 
@@ -28,19 +30,20 @@ Floating minimalist desktop widget for real-time system monitoring in the corner
 ## Run from source
 
 ```bash
+cargo run -p sysmon-native --release   # variante nativa (sin WebView): la de menor consumo
 npm install
 npm run tauri:dev       # variante Tauri (WebView2)
-cargo run -p sysmon-native --release   # variante nativa (sin WebView)
 ```
 
 ### Variante nativa: qué portó y qué falta
 
-La variante nativa (`native/`) replica: ventana frameless always-on-top con arrastre por el header, los 4 modos (mini/dev/charts/procs), las 6 gráficas con huecos honestos y auto-escala, Top-5 procesos con kill (confirmación + taskkill /F /T), tooltip por proceso, stats de sesión, bandeja con menú y globos de alerta, hotkey Ctrl+Shift+M y el mismo guardián proactivo (streaks + latch + cooldown). El DPI-awareness es per-monitor. Medido en vivo: **1 proceso, ~60 MB de árbol (host 42 MB + 2 typeperf), 0.31% CPU, exe de 0.7 MB**.
+La variante nativa (`native/`) replica: ventana frameless always-on-top con arrastre por el header, los 4 modos (mini/dev/charts/procs), las 6 gráficas con huecos honestos y auto-escala, Top-5 procesos con kill (confirmación + taskkill /F /T), tooltip por proceso, stats de sesión, bandeja con menú y globos de alerta, hotkey Ctrl+Shift+M y el mismo guardián proactivo (streaks + latch + cooldown). El DPI-awareness es per-monitor. Medido en vivo: **1 proceso + 2 typeperf, ~75 MB de árbol (~41 MB privados), ~0.1% CPU idle, exe de 0.5 MB** (vs ~381 MB / ~0.25% de la variante Tauri, casi todo WebView2).
 
 ## Build & distribution
 
 ```bash
-npm run tauri:build       # release binary (configure bundle targets in src-tauri/tauri.conf.json)
+cargo build --release -p sysmon-native   # variante nativa: un exe de 0.5 MB sin dependencias
+npm run tauri:build       # variante Tauri (configure bundle targets in src-tauri/tauri.conf.json)
 ```
 
 The binary is compiled natively in Rust: no Node runtime embedded, small footprint, and the web layer is sandboxed by WebView2 with a strict Content-Security-Policy.
