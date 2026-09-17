@@ -45,7 +45,7 @@ pub const COL_BLUE: D2D1_COLOR_F = rgb(0x00, 0xc8, 0xff);
 pub const COL_ALERT: D2D1_COLOR_F = rgb(0xff, 0x4d, 0x5e);
 
 /// Acciones de los controles golpeables (hit-test registrado al dibujar).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
     Pin,
     Mode(&'static str),

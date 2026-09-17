@@ -128,8 +128,8 @@ struct GuardianInput {
 impl Guardian {
     /// Tick del guardián: lee métricas/umbrales del estado compartido y delega
     /// la decisión en `evaluate` (la parte pura y testeable). `hwnd` es None
-    /// en tests; con Some dispara el globo de la bandeja.
-    fn check(&mut self, app: &Arc<AppState>, hwnd: Option<HWND>) {
+    /// en tests; con Some(hwnd, icon) dispara el globo de la bandeja.
+    fn check(&mut self, app: &Arc<AppState>, hwnd: Option<(HWND, HICON)>) {
         let snap = app.snapshot.lock().unwrap();
         let th = thresholds_of(app);
         let m = GuardianInput {
@@ -146,8 +146,8 @@ impl Guardian {
         };
         drop(snap);
         self.evaluate(&m, &mut |title, body| {
-            if let Some(h) = hwnd {
-                unsafe { tray_balloon(h, title, body) }
+            if let Some((h, icon)) = hwnd {
+                unsafe { tray_balloon(h, icon, title, body) }
             }
         });
     }
@@ -244,9 +244,19 @@ struct App {
     ui: ui::UiState,
     gfx: Option<ui::Gfx>,
     scale: f32,
-    mouse: (f32, f32), // coords lógicas
+    mouse: (f32, f32), // px físicos de cliente (igual que los hit-rects)
     tracking: bool,
     guardian: Guardian,
+    icon: HICON, // icono propio (bandeja + taskbar + globos), cargado una vez
+}
+
+/// Icono propio embebido: el mismo .ico de la variante Tauri. Los bytes viajan
+/// dentro del exe (sin archivos sueltos ni dependencias nuevas) y se decodifican
+/// con la API del sistema. Antes: IDI_APPLICATION genérico (el "sin logo").
+const APP_ICON_ICO: &[u8] = include_bytes!("../../src-tauri/icons/icon.ico");
+
+unsafe fn load_app_icon() -> windows::core::Result<HICON> {
+    CreateIconFromResourceEx(APP_ICON_ICO, true, 0x00030000, 0, 0, LR_DEFAULTCOLOR)
 }
 
 impl App {
@@ -293,9 +303,8 @@ fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
 }
 
 #[allow(unused_must_use)]
-unsafe fn tray_add(hwnd: HWND) {
+unsafe fn tray_add(hwnd: HWND, icon: HICON) {
     let mut nid = tray_data(hwnd);
-    let icon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
     nid.hIcon = icon;
     // NIF_ICON + NIF_TIP: sin ellos Windows ignora hIcon y szTip → icono
     // genérico en blanco y tooltip vacío (bug de presentación detectado).
@@ -315,9 +324,10 @@ unsafe fn tray_del(hwnd: HWND) {
 
 /// Globo de notificación (equivalente nativo de Notification() del renderer).
 #[allow(unused_must_use)]
-unsafe fn tray_balloon(hwnd: HWND, title: &str, body: &str) {
+unsafe fn tray_balloon(hwnd: HWND, icon: HICON, title: &str, body: &str) {
     let mut nid = tray_data(hwnd);
-    nid.uFlags |= NIF_INFO;
+    nid.uFlags |= NIF_INFO | NIF_ICON;
+    nid.hIcon = icon;
     let t: Vec<u16> = title.encode_utf16().take(63).collect();
     nid.szInfoTitle[..t.len()].copy_from_slice(&t);
     nid.szInfoTitle[t.len().min(63)] = 0;
@@ -419,9 +429,12 @@ unsafe fn snap_edge(hwnd: HWND) -> (i32, i32) {
     (x, y)
 }
 
-/// Hit-test de los controles dibujados (coords lógicas).
+/// Hit-test de los controles dibujados (coords FÍSICAS de cliente, igual que
+/// los rects que registra draw(): el espacio es px de la ventana, no lógico).
+/// Recorre en REVERSA: lo dibujado después (overlay de Ajustes) tapa a lo de
+/// abajo y por tanto gana el clic.
 fn hit<'a>(ui: &'a ui::UiState, x: f32, y: f32) -> Option<ui::Action> {
-    ui.hits.iter().find(|h| h.rect.contains(x, y)).map(|h| h.action)
+    ui.hits.iter().rev().find(|h| h.rect.contains(x, y)).map(|h| h.action)
 }
 
 // ---------------------------------------------------------------------------
@@ -435,15 +448,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_ERASEBKGND => return LRESULT(1), // sin flicker: pintamos todo en WM_PAINT
         WM_NCHITTEST => {
-            // El header es zona de arrastre nativa (equivale a
-            // data-tauri-drag-region): arrastrar el widget por su cabecera.
-            // Con el overlay de Ajustes abierto, la zona bajo la cabecera
-            // vuelve a ser HTCLIENT: los botones del overlay deben recibir
-            // el clic (HTCAPTION se los tragaba → overlay no clicable).
+            // Los botones del header deben recibir el clic: si el punto cae
+            // en un hit-rect registrado, HTCLIENT. Sin esto, el header como
+            // HTCAPTION se tragaba el mousedown para iniciar el arrastre y
+            // Windows JAMÁS entregaba WM_LBUTTONDOWN: tabs, pin, ajustes y
+            // close muertos aunque existieran y tuvieran handler.
+            // El header SIN botón sigue siendo arrastre nativo (equivale a
+            // data-tauri-drag-region). Con el overlay de Ajustes abierto, la
+            // zona bajo la cabecera vuelve a ser HTCLIENT.
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             let mut pt = POINT { x: ((lparam.0) & 0xFFFF) as u16 as i16 as i32, y };
             let _ = ScreenToClient(hwnd, &mut pt);
             if let Some(app) = ptr.as_ref() {
+                // hits y NCHITTEST viven en px físicos de cliente: sin escalas.
+                if hit(&app.ui, pt.x as f32, pt.y as f32).is_some() {
+                    return LRESULT(HTCLIENT as isize);
+                }
                 if (pt.y as f32) < 36.0 * app.scale && !app.ui.show_settings {
                     return LRESULT(HTCAPTION as isize);
                 }
@@ -492,7 +512,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             TIMER_METRICS => {
                 if app.state.visible.load(Ordering::SeqCst) {
                     app.push_metrics();
-                    app.guardian.check(&app.state, Some(hwnd));
+                    app.guardian.check(&app.state, Some((hwnd, app.icon)));
                     InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
@@ -507,7 +527,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEMOVE => {
             let x = ((lparam.0) & 0xFFFF) as u16 as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            app.mouse = (x as f32 / app.scale, y as f32 / app.scale);
+            app.mouse = (x as f32, y as f32);
             if !app.tracking {
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -542,8 +562,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             app.mouse = (
-                ((lparam.0) & 0xFFFF) as u16 as i16 as f32 / app.scale,
-                ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / app.scale,
+                ((lparam.0) & 0xFFFF) as u16 as i16 as f32,
+                ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32,
             );
             if let Some(action) = hit(&app.ui, app.mouse.0, app.mouse.1) {
                 handle_action(app, hwnd, action);
@@ -639,6 +659,13 @@ unsafe fn handle_action(app: &mut App, hwnd: HWND, action: ui::Action) {
             let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             app.state.pinned.store(new, Ordering::SeqCst);
             app.ui.pinned = new;
+            // El pin se persiste como el modo (igual que Tauri): si no, el
+            // toggle funciona en vivo pero se pierde al reiniciar.
+            {
+                let mut st = app.state.settings.lock().unwrap();
+                st.pinned = new;
+                let _ = st.save();
+            }
             InvalidateRect(Some(hwnd), None, false);
         }
         ui::Action::Mode(m) => set_mode(app, hwnd, m),
@@ -656,7 +683,7 @@ unsafe fn handle_action(app: &mut App, hwnd: HWND, action: ui::Action) {
                 // El error (permisos, PID ya muerto) se reporta en un globo.
                 match kill::kill_process(Some(pid as i64)) {
                     Ok(_) => {}
-                    Err(e) => tray_balloon(hwnd, "Kill falló", &e),
+                    Err(e) => tray_balloon(hwnd, app.icon, "Kill falló", &e),
                 }
                 InvalidateRect(Some(hwnd), None, false);
             }
@@ -668,7 +695,11 @@ unsafe fn handle_action(app: &mut App, hwnd: HWND, action: ui::Action) {
         ui::Action::Th(field, delta) => {
             {
                 let mut st = app.state.settings.lock().unwrap();
-                let cur = match field {
+                // draw_settings etiqueta en MAYÚSCULAS ("CPU") y set() espera
+                // minúsculas ("cpu"): sin normalizar, el match daba None y el
+                // clic se ignoraba en silencio (steppers muertos).
+                let key = field.to_lowercase();
+                let cur = match key.as_str() {
                     "cpu" => Some(st.thresholds.cpu),
                     "ram" => Some(st.thresholds.ram),
                     "gpu" => Some(st.thresholds.gpu),
@@ -676,7 +707,7 @@ unsafe fn handle_action(app: &mut App, hwnd: HWND, action: ui::Action) {
                     _ => None,
                 };
                 if let Some(v) = cur {
-                    st.thresholds.set(field, v + delta as f64);
+                    st.thresholds.set(&key, v + delta as f64);
                     let _ = st.save();
                 }
             }
@@ -766,6 +797,7 @@ fn main() -> windows::core::Result<()> {
             mouse: (0.0, 0.0),
             tracking: false,
             guardian: Guardian::default(),
+            icon: load_app_icon().unwrap_or_default(),
         });
 
         // Ventana frameless: posición guardada o esquina superior derecha.
@@ -814,6 +846,11 @@ fn main() -> windows::core::Result<()> {
             );
         }
 
+        // Icono propio en taskbar/alt-tab (la clase se registró sin hIcon;
+// WM_SETICON por ventana lo cubre sin build script ni .rc).
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(app.icon.0 as isize)));
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(app.icon.0 as isize)));
+
         // Temporizadores + hotkey + bandeja.
         SetTimer(Some(hwnd), TIMER_METRICS, METRICS_MS, None);
         // El hotkey global es un extra, no algo vital: si otro proceso ya lo
@@ -822,7 +859,7 @@ fn main() -> windows::core::Result<()> {
         if RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0), VK_M.0 as u32).is_err() {
             eprintln!("sysmon-native: Ctrl+Shift+M ocupado por otro proceso; continuando sin hotkey");
         }
-        tray_add(hwnd);
+        tray_add(hwnd, app.icon);
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
@@ -1031,5 +1068,27 @@ mod guardian_tests {
         for i in 0..4 {
             assert!(g.ready(i), "canal {i} debería estar listo al arrancar");
         }
+    }
+
+    /// El overlay de Ajustes se dibuja DESPUÉS (sus hits van últimos): ante
+    /// solape con filas del modo, el clic debe ir al overlay, no a la fila.
+    /// Regression del hit-test hacia adelante (el comentario decía "reversa"
+    /// pero el código hacía find() directo: un clic en un stepper podía
+    /// caer en el KILL de la fila de abajo).
+    #[test]
+    fn hit_prioriza_ultimo_dibujado_sobre_solape() {
+        let mut uist = ui::UiState::default();
+        uist.hits.push(ui::HitRect {
+            rect: ui::RECT_F { l: 0.0, t: 0.0, r: 100.0, b: 30.0 },
+            action: ui::Action::Kill(1234),
+        });
+        uist.hits.push(ui::HitRect {
+            rect: ui::RECT_F { l: 10.0, t: 5.0, r: 40.0, b: 25.0 },
+            action: ui::Action::Th("cpu", 5.0),
+        });
+        assert_eq!(hit(&uist, 20.0, 10.0), Some(ui::Action::Th("cpu", 5.0)));
+        // Fuera del solape, cada uno responde lo suyo.
+        assert_eq!(hit(&uist, 80.0, 10.0), Some(ui::Action::Kill(1234)));
+        assert_eq!(hit(&uist, 200.0, 200.0), None);
     }
 }
