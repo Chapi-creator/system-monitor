@@ -111,15 +111,19 @@ impl Settings {
 
     /// Carga tolerante: cualquier problema (inexistente, JSON inválido,
     /// campos extra/faltantes) → defaults parciales. Nunca pánico.
+    /// Tolera BOM inicial (editores como Notepad lo agregan al guardar
+    /// UTF-8: sin esto, un settings editado a mano reseteaba todo a
+    /// defaults en silencio porque serde_json rechaza el BOM).
     pub fn load() -> Self {
         let Ok(text) = std::fs::read_to_string(Self::path()) else {
             return Self::default();
         };
-        match serde_json::from_str::<Settings>(&text) {
+        let text = text.trim_start_matches('﻿');
+        match serde_json::from_str::<Settings>(text) {
             Ok(s) => s.sanitized(),
             // Compatibilidad parcial: si el archivo entero no matchea, intentar
             // rescatar solo los umbrales (formato de versiones previas).
-            Err(_) => serde_json::from_str::<Thresholds>(&text)
+            Err(_) => serde_json::from_str::<Thresholds>(text)
                 .map(|t| Self { thresholds: t.clamped(), ..Default::default() })
                 .unwrap_or_default(),
         }
@@ -193,6 +197,20 @@ mod tests {
         assert_eq!(loaded, s);
         assert_eq!(loaded.thresholds.cpu, 70.0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_tolera_bom_inicial() {
+        // Notepad guarda UTF-8 con BOM y serde_json lo rechaza: load() lo
+        // recorta antes de parsear. Sin el recorte, un settings editado a
+        // mano reseteaba TODO a defaults en silencio.
+        let bom = char::from_u32(0xFEFF).unwrap();
+        let with_bom = format!("{bom}{{ \"mode\": \"charts\", \"thresholds\": {{ \"cpu\": 70.0 }} }}");
+        assert!(serde_json::from_str::<Settings>(&with_bom).is_err());
+        let s: Settings =
+            serde_json::from_str(with_bom.trim_start_matches(bom)).unwrap();
+        assert_eq!(s.mode, "charts");
+        assert_eq!(s.thresholds.cpu, 70.0);
     }
 
     #[test]
